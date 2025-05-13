@@ -1,4 +1,4 @@
-# app.py — SpatChat-style with folium preview map only (simplified)
+# app.py — SpatChat-style with folium preview map (visible by default, more basemaps, optional tracks)
 import gradio as gr
 import pandas as pd
 import folium
@@ -16,17 +16,26 @@ def handle_upload(file):
     except Exception as e:
         return f"<p>Error reading CSV: {e}</p>"
 
-    required_cols = {"latitude", "longitude", "timestamp", "animal_id"}
-    if not required_cols.issubset(df.columns):
-        return f"<p>CSV must contain columns: {', '.join(required_cols)}</p>"
+    # Accept if user has only lat/lon (e.g., camera trap data)
+    required = {"latitude", "longitude"}
+    if not required.issubset(df.columns):
+        return f"<p>CSV must contain at least: latitude, longitude</p>"
 
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    has_timestamp = "timestamp" in df.columns
+    has_animal_id = "animal_id" in df.columns
+    if has_timestamp:
+        df["timestamp"] = pd.to_datetime(df["timestamp"])
+    if not has_animal_id:
+        df["animal_id"] = "sample"
+
     center = [df["latitude"].mean(), df["longitude"].mean()]
     m = folium.Map(location=center, zoom_start=6, control_scale=True)
 
-    # Only use basemaps with proper attribution
+    # Basemaps with proper attribution
     folium.TileLayer("OpenStreetMap").add_to(m)
     folium.TileLayer("CartoDB positron", attr='CartoDB').add_to(m)
+    folium.TileLayer("CartoDB dark_matter", attr='CartoDB').add_to(m)
+    folium.TileLayer("Stamen Toner", attr='Stamen').add_to(m)
 
     points_layer = folium.FeatureGroup(name="Points", show=True)
     lines_layer = folium.FeatureGroup(name="Tracks", show=True)
@@ -35,24 +44,28 @@ def handle_upload(file):
     color_map = {aid: f"#{random.randint(0, 0xFFFFFF):06x}" for aid in animal_ids}
 
     for animal in animal_ids:
-        track = df[df["animal_id"] == animal].sort_values("timestamp")
+        track = df[df["animal_id"] == animal]
         coords = list(zip(track["latitude"], track["longitude"]))
         color = color_map[animal]
 
-        folium.PolyLine(coords, color=color, weight=2.5, opacity=0.8, popup=animal).add_to(lines_layer)
+        if has_timestamp:
+            track = track.sort_values("timestamp")
+            folium.PolyLine(coords, color=color, weight=2.5, opacity=0.8, popup=animal).add_to(lines_layer)
 
         for _, row in track.iterrows():
+            label = f"{animal}" + (f"<br>{row['timestamp']}" if has_timestamp else "")
             folium.CircleMarker(
                 location=[row["latitude"], row["longitude"]],
                 radius=3,
-                popup=f"{animal}<br>{row['timestamp']}",
+                popup=label,
                 color=color,
                 fill=True,
                 fill_opacity=0.7
             ).add_to(points_layer)
 
     points_layer.add_to(m)
-    lines_layer.add_to(m)
+    if has_timestamp:
+        lines_layer.add_to(m)
     folium.LayerControl(collapsed=False).add_to(m)
 
     return m._repr_html_()
@@ -61,7 +74,7 @@ with gr.Blocks() as demo:
     gr.Markdown("## SpatChat: Home Range - Movement Preview")
     with gr.Row():
         with gr.Column(scale=3):
-            map_output = gr.HTML(label="Map Preview", value="<p>Waiting for movement data...</p>", show_label=False)
+            map_output = gr.HTML(label="Map Preview", value=handle_upload.__defaults__[0] if handle_upload.__defaults__ else "<p>Waiting for movement data...</p>", show_label=False)
         with gr.Column(scale=2):
             chatbot = gr.Chatbot(label="SpatChat", show_label=True, type="messages")
             file_input = gr.File(label="Upload Movement CSV")
