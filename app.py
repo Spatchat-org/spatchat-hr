@@ -1,10 +1,27 @@
-# app.py — SpatChat-style with folium preview map (visible by default, more basemaps, optional tracks)
+# app.py — SpatChat-style with folium preview map (simplified basemaps, satellite support, default map visible)
 import gradio as gr
 import pandas as pd
 import folium
 import os
 import shutil
 import random
+
+def render_empty_map():
+    m = folium.Map(location=[0, 0], zoom_start=2, control_scale=True)
+    folium.TileLayer("OpenStreetMap").add_to(m)
+    folium.TileLayer("CartoDB positron", attr='CartoDB').add_to(m)
+    folium.TileLayer(
+        tiles="https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
+        attr="OpenTopoMap",
+        name="Topographic"
+    ).add_to(m)
+    folium.TileLayer(
+        tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        attr="Esri",
+        name="Satellite"
+    ).add_to(m)
+    folium.LayerControl(collapsed=False).add_to(m)
+    return m._repr_html_()
 
 def handle_upload(file):
     os.makedirs("uploads", exist_ok=True)
@@ -16,7 +33,6 @@ def handle_upload(file):
     except Exception as e:
         return f"<p>Error reading CSV: {e}</p>"
 
-    # Accept if user has only lat/lon (e.g., camera trap data)
     required = {"latitude", "longitude"}
     if not required.issubset(df.columns):
         return f"<p>CSV must contain at least: latitude, longitude</p>"
@@ -31,11 +47,18 @@ def handle_upload(file):
     center = [df["latitude"].mean(), df["longitude"].mean()]
     m = folium.Map(location=center, zoom_start=6, control_scale=True)
 
-    # Basemaps with proper attribution
     folium.TileLayer("OpenStreetMap").add_to(m)
     folium.TileLayer("CartoDB positron", attr='CartoDB').add_to(m)
-    folium.TileLayer("CartoDB dark_matter", attr='CartoDB').add_to(m)
-    folium.TileLayer("Stamen Toner", attr='Stamen').add_to(m)
+    folium.TileLayer(
+        tiles="https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
+        attr="OpenTopoMap",
+        name="Topographic"
+    ).add_to(m)
+    folium.TileLayer(
+        tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        attr="Esri",
+        name="Satellite"
+    ).add_to(m)
 
     points_layer = folium.FeatureGroup(name="Points", show=True)
     lines_layer = folium.FeatureGroup(name="Tracks", show=True)
@@ -74,7 +97,7 @@ with gr.Blocks() as demo:
     gr.Markdown("## SpatChat: Home Range - Movement Preview")
     with gr.Row():
         with gr.Column(scale=3):
-            map_output = gr.HTML(label="Map Preview", value=handle_upload.__defaults__[0] if handle_upload.__defaults__ else "<p>Waiting for movement data...</p>", show_label=False)
+            map_output = gr.HTML(label="Map Preview", value=render_empty_map(), show_label=False)
         with gr.Column(scale=2):
             chatbot = gr.Chatbot(label="SpatChat", show_label=True, type="messages")
             file_input = gr.File(label="Upload Movement CSV")
