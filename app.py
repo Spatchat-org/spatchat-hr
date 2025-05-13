@@ -1,4 +1,4 @@
-# app.py — Coordinate detection with fallback CRS/column prompts
+# app.py — Chatbot greeting + map upload with CRS fallback
 import gradio as gr
 import pandas as pd
 import folium
@@ -49,12 +49,17 @@ def handle_upload_initial(file):
         cached_df = df
         cached_headers = list(df.columns)
     except Exception as e:
-        return f"<p>Error reading CSV: {e}</p>", gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), render_empty_map()
+        return [], gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), render_empty_map()
 
     lower_cols = [col.lower() for col in df.columns]
     if "latitude" in lower_cols and "longitude" in lower_cols:
-        return handle_upload_confirm("longitude", "latitude", ""), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), None
-    return "<p>Please confirm coordinate settings:</p>", gr.update(choices=cached_headers, value=cached_headers[0], visible=True), gr.update(choices=cached_headers, value=cached_headers[1], visible=True), gr.update(visible=True), render_empty_map()
+        return [
+            {"role": "assistant", "content": "CSV uploaded successfully. Latitude and longitude detected. You may now proceed to create home ranges."}
+        ], gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), handle_upload_confirm("longitude", "latitude", "")
+
+    return [
+        {"role": "assistant", "content": "CSV uploaded. Coordinate columns not clearly labeled. Please confirm X/Y columns and provide a CRS if needed."}
+    ], gr.update(choices=cached_headers, value=cached_headers[0], visible=True), gr.update(choices=cached_headers, value=cached_headers[1], visible=True), gr.update(visible=True), render_empty_map()
 
 def handle_upload_confirm(x_col, y_col, crs_input):
     global cached_df
@@ -135,7 +140,9 @@ with gr.Blocks() as demo:
         with gr.Column(scale=3):
             map_output = gr.HTML(label="Map Preview", value=render_empty_map(), show_label=False)
         with gr.Column(scale=2):
-            chatbot = gr.Chatbot(label="SpatChat", show_label=True, type="messages")
+            chatbot = gr.Chatbot(label="SpatChat", show_label=True, type="messages", value=[
+                {"role": "assistant", "content": "Welcome to SpatChat! Please upload a CSV containing coordinates (lat/lon or UTM) and optional timestamp/animal_id to begin."}
+            ])
             file_input = gr.File(label="Upload Movement CSV")
             x_col = gr.Dropdown(label="X column", choices=[], visible=False)
             y_col = gr.Dropdown(label="Y column", choices=[], visible=False)
