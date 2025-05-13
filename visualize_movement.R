@@ -5,8 +5,7 @@ output_dir <- args[2]
 
 cat("Reading data from:", csv_path, "\n")
 
-# Load libraries
-if (!require("ggplot2")) install.packages("ggplot2", repos = "https://cloud.r-project.org")
+# Load ggplot2 (assumed preinstalled via apt)
 library(ggplot2)
 
 # Read CSV
