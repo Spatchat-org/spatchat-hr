@@ -1,1 +1,6 @@
-install.packages(c("sf", "raster", "move", "dplyr"))
+install.packages(c(
+  "move",
+  "sf",
+  "raster",
+  "dplyr"
+), dependencies = TRUE)
