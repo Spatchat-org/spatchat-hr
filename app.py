@@ -1,4 +1,4 @@
-# app.py — Flexible coordinate upload with UTM zone or EPSG support
+# app.py — Coordinate detection with fallback CRS/column prompts
 import gradio as gr
 import pandas as pd
 import folium
@@ -7,12 +7,15 @@ import shutil
 import random
 from pyproj import CRS, Transformer
 
+cached_df = None
+cached_headers = []
+
 def parse_crs_input(crs_input):
     crs_input = str(crs_input).strip().upper()
     if crs_input.startswith("EPSG:"):
         return int(crs_input.split(":")[1])
     if crs_input.isdigit():
-        return 32600 + int(crs_input)  # default to northern
+        return 32600 + int(crs_input)
     if len(crs_input) >= 2 and crs_input[:-1].isdigit() and crs_input[-1] in ("N", "S"):
         zone = int(crs_input[:-1])
         return 32600 + zone if crs_input[-1] == "N" else 32700 + zone
@@ -35,20 +38,30 @@ def render_empty_map():
     folium.LayerControl(collapsed=False).add_to(m)
     return m._repr_html_()
 
-def handle_upload(file, x_col, y_col, crs_input):
+def handle_upload_initial(file):
+    global cached_df, cached_headers
     os.makedirs("uploads", exist_ok=True)
     filename = os.path.join("uploads", os.path.basename(file))
     shutil.copy(file, filename)
 
     try:
         df = pd.read_csv(filename)
+        cached_df = df
+        cached_headers = list(df.columns)
     except Exception as e:
-        return f"<p>Error reading CSV: {e}</p>"
+        return f"<p>Error reading CSV: {e}</p>", gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), render_empty_map()
 
+    lower_cols = [col.lower() for col in df.columns]
+    if "latitude" in lower_cols and "longitude" in lower_cols:
+        return handle_upload_confirm("longitude", "latitude", ""), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), None
+    return "<p>Please confirm coordinate settings:</p>", gr.update(choices=cached_headers, value=cached_headers[0], visible=True), gr.update(choices=cached_headers, value=cached_headers[1], visible=True), gr.update(visible=True), render_empty_map()
+
+def handle_upload_confirm(x_col, y_col, crs_input):
+    global cached_df
+    df = cached_df.copy()
     if x_col not in df.columns or y_col not in df.columns:
         return "<p>Selected coordinate columns not found in data.</p>"
 
-    # If data already in lat/lon use directly, else transform
     if x_col.lower() in ["longitude", "lon"] and y_col.lower() in ["latitude", "lat"]:
         df['longitude'] = df[x_col]
         df['latitude'] = df[y_col]
@@ -124,9 +137,11 @@ with gr.Blocks() as demo:
         with gr.Column(scale=2):
             chatbot = gr.Chatbot(label="SpatChat", show_label=True, type="messages")
             file_input = gr.File(label="Upload Movement CSV")
-            x_col = gr.Text(label="X column (e.g. 'longitude' or 'easting')", value="longitude")
-            y_col = gr.Text(label="Y column (e.g. 'latitude' or 'northing')", value="latitude")
-            crs_input = gr.Text(label="CRS (e.g. '32633', '33N', or 'EPSG:32633')", value="")
-            file_input.change(fn=handle_upload, inputs=[file_input, x_col, y_col, crs_input], outputs=map_output)
+            x_col = gr.Dropdown(label="X column", choices=[], visible=False)
+            y_col = gr.Dropdown(label="Y column", choices=[], visible=False)
+            crs_input = gr.Text(label="CRS (e.g. '32633', '33N', or 'EPSG:32633')", visible=False)
+            confirm_btn = gr.Button("Confirm Coordinate Settings", visible=False)
+            file_input.change(fn=handle_upload_initial, inputs=file_input, outputs=[chatbot, x_col, y_col, crs_input, map_output])
+            confirm_btn.click(fn=handle_upload_confirm, inputs=[x_col, y_col, crs_input], outputs=map_output)
 
 demo.launch()
