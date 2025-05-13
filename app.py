@@ -34,3 +34,5 @@ with gr.Blocks() as demo:
     output_image = gr.Image(label="Movement Plot", value=None)
 
     file_input.change(fn=handle_upload, inputs=file_input, outputs=output_image)
+
+demo.launch()
