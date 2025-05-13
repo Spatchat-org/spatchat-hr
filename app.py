@@ -1,6 +1,7 @@
 import gradio as gr
 import pandas as pd
 import subprocess
+import shutil
 import os
 
 UPLOAD_DIR = "uploads"
@@ -9,13 +10,13 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 def handle_upload(file):
-    filename = os.path.join(UPLOAD_DIR, file.name)
-    file.save(filename)
+    # file is already a file path (string), not a file-like object
+    filename = os.path.join(UPLOAD_DIR, os.path.basename(file))
+    shutil.copy(file, filename)
 
-    # Call R script to generate visualization
+    # Call R script
     subprocess.run(["Rscript", "visualize_movement.R", filename, OUTPUT_DIR], check=True)
 
-    # Output is saved as PNG
     return os.path.join(OUTPUT_DIR, "track_plot.png")
 
 with gr.Blocks() as demo:
