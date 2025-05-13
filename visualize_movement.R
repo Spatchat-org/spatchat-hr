@@ -1,4 +1,3 @@
-# visualize_movement.R
 args <- commandArgs(trailingOnly = TRUE)
 csv_path <- args[1]
 output_dir <- args[2]

@@ -25,7 +25,7 @@ def handle_upload(file):
         return "R script did not generate an output image. Check logs and R package installation."
 
     return result_path
-    
+
 with gr.Blocks() as demo:
     gr.Markdown("## SpatChat: Movement Data Visualizer")
 
