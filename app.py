@@ -1,45 +1,54 @@
+# app.py — folium-powered movement map preview
 import gradio as gr
 import pandas as pd
-import subprocess
+import folium
 import os
-import shutil
 
 def handle_upload(file):
-    # Ensure folders exist
     os.makedirs("uploads", exist_ok=True)
-    os.makedirs("outputs", exist_ok=True)
-
-    # Copy uploaded file to working dir
     filename = os.path.join("uploads", os.path.basename(file))
-    shutil.copy(file, filename)
+    with open(filename, "wb") as f:
+        f.write(file.read())
 
-    # Find Rscript path
     try:
-        rscript_path = subprocess.check_output(["which", "Rscript"]).decode("utf-8").strip()
-    except subprocess.CalledProcessError:
-        return "Rscript not found. Is R installed correctly?"
+        df = pd.read_csv(filename)
+    except Exception as e:
+        return f"Error reading CSV: {e}"
 
-    # Run R script
-    try:
-        subprocess.run([rscript_path, "visualize_movement.R", filename, "outputs"], check=True)
-    except subprocess.CalledProcessError as e:
-        return f"R script failed: {e}"
+    required_cols = {"latitude", "longitude", "timestamp", "animal_id"}
+    if not required_cols.issubset(df.columns):
+        return f"CSV must contain columns: {', '.join(required_cols)}"
 
-    # Verify image was created
-    result_path = os.path.join("outputs", "track_plot.png")
-    if not os.path.exists(result_path):
-        return "R script did not generate an output image. Check logs and R package installation."
+    # Center map on the mean location
+    center = [df["latitude"].mean(), df["longitude"].mean()]
+    m = folium.Map(location=center, zoom_start=6)
 
-    return result_path
+    # Plot points and lines per animal
+    for animal in df["animal_id"].unique():
+        track = df[df["animal_id"] == animal].sort_values("timestamp")
+        coords = list(zip(track["latitude"], track["longitude"]))
+
+        folium.PolyLine(coords, color="blue", weight=2.5, opacity=0.8, popup=animal).add_to(m)
+
+        for i, row in track.iterrows():
+            folium.CircleMarker(
+                location=[row["latitude"], row["longitude"]],
+                radius=3,
+                popup=f"{animal}<br>{row['timestamp']}",
+                color="black",
+                fill=True,
+                fill_opacity=0.7
+            ).add_to(m)
+
+    return m._repr_html_()
 
 with gr.Blocks() as demo:
-    gr.Markdown("## SpatChat: Movement Data Visualizer")
+    gr.Markdown("## SpatChat: Interactive Movement Map")
 
     with gr.Row():
         file_input = gr.File(label="Upload Movement CSV")
-    # Keep the map preview always visible with fixed height
-    output_image = gr.Image(label="Movement Plot", value=None, height=400, show_label=True)
+    map_output = gr.HTML(label="Map Preview")
 
-    file_input.change(fn=handle_upload, inputs=file_input, outputs=output_image)
+    file_input.change(fn=handle_upload, inputs=file_input, outputs=map_output)
 
 demo.launch()
