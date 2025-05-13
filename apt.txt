@@ -3,8 +3,5 @@ libcurl4-openssl-dev
 libssl-dev
 libxml2-dev
 libudunits2-dev
-gradio
-pandas
-folium
-pyproj
+
 
