@@ -10,13 +10,19 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 def handle_upload(file):
-    filename = os.path.join(UPLOAD_DIR, os.path.basename(file))
+    filename = os.path.join("uploads", os.path.basename(file))
     shutil.copy(file, filename)
 
-    # Use absolute path to Rscript
-    subprocess.run(["/usr/bin/Rscript", "visualize_movement.R", filename, OUTPUT_DIR], check=True)
+    # Dynamically locate Rscript
+    try:
+        rscript_path = subprocess.check_output(["which", "Rscript"]).decode("utf-8").strip()
+    except subprocess.CalledProcessError:
+        return "Rscript not found. Is R installed correctly?"
 
-    return os.path.join(OUTPUT_DIR, "track_plot.png")
+    # Call the R script
+    subprocess.run([rscript_path, "visualize_movement.R", filename, "outputs"], check=True)
+
+    return os.path.join("outputs", "track_plot.png")
 
 with gr.Blocks() as demo:
     gr.Markdown("## SpatChat: Movement Data Visualizer")
