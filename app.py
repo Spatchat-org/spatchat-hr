@@ -17,16 +17,17 @@ def handle_upload(file):
     try:
         df = pd.read_csv(filename)
     except Exception as e:
-        return f"Error reading CSV: {e}", gr.update(choices=[]), None
+        return f"Error reading CSV: {e}", gr.update(choices=[]), None, None
 
     required_cols = {"latitude", "longitude", "timestamp", "animal_id"}
     if not required_cols.issubset(df.columns):
-        return f"CSV must contain columns: {', '.join(required_cols)}", gr.update(choices=[]), None
+        return f"CSV must contain columns: {', '.join(required_cols)}", gr.update(choices=[]), None, None
 
     df["timestamp"] = pd.to_datetime(df["timestamp"])
     last_df = df
     animals = sorted(df["animal_id"].unique().tolist())
-    return render_map(df), gr.update(choices=["All"] + animals, value="All"), df["timestamp"].min(), df["timestamp"].max()
+    tmin, tmax = df["timestamp"].min(), df["timestamp"].max()
+    return render_map(df), gr.update(choices=["All"] + animals, value="All"), str(tmin), str(tmax)
 
 def render_map(df, selected_animal="All", time_range=None):
     if df is None or df.empty:
@@ -35,7 +36,7 @@ def render_map(df, selected_animal="All", time_range=None):
     if selected_animal != "All":
         df = df[df["animal_id"] == selected_animal]
     if time_range:
-        df = df[(df["timestamp"] >= time_range[0]) & (df["timestamp"] <= time_range[1])]
+        df = df[(df["timestamp"] >= pd.to_datetime(time_range[0])) & (df["timestamp"] <= pd.to_datetime(time_range[1]))]
 
     if df.empty:
         return "<p>No points match current filters.</p>"
@@ -78,9 +79,9 @@ def render_map(df, selected_animal="All", time_range=None):
 
     return m._repr_html_()
 
-def update_filters(selected_animal, time_range):
+def update_filters(selected_animal, tmin, tmax):
     global last_df
-    return render_map(last_df, selected_animal, time_range)
+    return render_map(last_df, selected_animal, (tmin, tmax))
 
 with gr.Blocks() as demo:
     gr.Markdown("## SpatChat: Home Range - Movement Preview")
@@ -88,13 +89,15 @@ with gr.Blocks() as demo:
         with gr.Column(scale=3):
             map_output = gr.HTML(label="Map Preview", value="<p>Waiting for movement data...</p>", show_label=False)
         with gr.Column(scale=2):
-            chatbot = gr.Chatbot(label="SpatChat", show_label=True)
+            chatbot = gr.Chatbot(label="SpatChat", show_label=True, type="messages")
             file_input = gr.File(label="Upload Movement CSV")
             animal_selector = gr.Dropdown(choices=[], label="Filter by Animal")
-            time_slider = gr.Slider(label="Time Filter", minimum=0, maximum=1)
+            tmin = gr.Text(label="Start Time")
+            tmax = gr.Text(label="End Time")
 
-            file_input.change(fn=handle_upload, inputs=file_input, outputs=[map_output, animal_selector, time_slider.minimum, time_slider.maximum])
-            animal_selector.change(fn=update_filters, inputs=[animal_selector, time_slider], outputs=map_output)
-            time_slider.change(fn=update_filters, inputs=[animal_selector, time_slider], outputs=map_output)
+            file_input.change(fn=handle_upload, inputs=file_input, outputs=[map_output, animal_selector, tmin, tmax])
+            animal_selector.change(fn=update_filters, inputs=[animal_selector, tmin, tmax], outputs=map_output)
+            tmin.change(fn=update_filters, inputs=[animal_selector, tmin, tmax], outputs=map_output)
+            tmax.change(fn=update_filters, inputs=[animal_selector, tmin, tmax], outputs=map_output)
 
 demo.launch()
