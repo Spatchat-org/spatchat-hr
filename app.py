@@ -57,9 +57,13 @@ def handle_upload_initial(file):
             {"role": "assistant", "content": "CSV uploaded successfully. Latitude and longitude detected. You may now proceed to create home ranges."}
         ], gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), handle_upload_confirm("longitude", "latitude", "")
 
+    # Heuristic for best guesses
+    preferred_x = next((col for col in df.columns if col.lower() in ["x", "easting"]), df.columns[0])
+    preferred_y = next((col for col in df.columns if col.lower() in ["y", "northing"]), df.columns[1] if len(df.columns) > 1 else df.columns[0])
+
     return [
         {"role": "assistant", "content": "CSV uploaded. Coordinate columns not clearly labeled. Please confirm X/Y columns and provide a CRS if needed."}
-    ], gr.update(choices=cached_headers, value=cached_headers[0], visible=True), gr.update(choices=cached_headers, value=cached_headers[1], visible=True), gr.update(visible=True), render_empty_map()
+    ], gr.update(choices=cached_headers, value=preferred_x, visible=True), gr.update(choices=cached_headers, value=preferred_y, visible=True), gr.update(visible=True), render_empty_map()
 
 def handle_upload_confirm(x_col, y_col, crs_input):
     global cached_df
