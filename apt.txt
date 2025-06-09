@@ -11,3 +11,8 @@ libgdal-dev
 libgeos-dev
 libproj-dev
 libudunits2-dev
+r-base
+r-cran-sf
+r-cran-move
+r-cran-dplyr
+r-cran-data.table
