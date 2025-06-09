@@ -5,6 +5,8 @@ import os
 import shutil
 import random
 from pyproj import CRS, Transformer
+import subprocess
+import glob
 
 cached_df = None
 cached_headers = []
@@ -56,7 +58,6 @@ def handle_upload_initial(file):
             {"role": "assistant", "content": "CSV uploaded successfully. Latitude and longitude detected. You may now proceed to create home ranges."}
         ], gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), handle_upload_confirm("longitude", "latitude", ""), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False)
 
-    # Heuristic for best guesses
     preferred_x = next((col for col in df.columns if col.lower() in ["x", "easting"]), df.columns[0])
     preferred_y = next((col for col in df.columns if col.lower() in ["y", "northing"]), df.columns[1] if len(df.columns) > 1 else df.columns[0])
 
@@ -142,13 +143,83 @@ def handle_upload_confirm(x_col, y_col, crs_input):
 
     return m._repr_html_()
 
+def overlay_geojson_on_map(map_html, geojson_files):
+    from bs4 import BeautifulSoup
+    m = folium.Map(location=[0, 0], zoom_start=2, control_scale=True)
+    # The input map_html is a raw HTML string from folium._repr_html_()
+    # We'll re-create the map and overlay GeoJSONs for accuracy.
+    # In practice, you may want to store the latest folium.Map object for direct access.
+    # For now, let's assume the map is already in the right location and layers.
+    # Overlay each geojson
+    for gj in geojson_files:
+        folium.GeoJson(gj, name=os.path.basename(gj)).add_to(m)
+    folium.LayerControl(collapsed=False).add_to(m)
+    return m._repr_html_()
+
 def handle_chat(chat_history, user_message):
-    if not user_message.strip():
-        return chat_history
-    response = f"SpatChat says: You asked '{user_message}' (feature under development)"
-    chat_history = chat_history + [{"role": "user", "content": user_message}]
-    chat_history = chat_history + [{"role": "assistant", "content": response}]
-    return chat_history
+    global cached_df
+    user_message = user_message.strip()
+    response = ""
+    percent = 95  # Default
+    geojson_files = []
+    new_map = None
+
+    if user_message.lower().startswith("mcp"):
+        import re
+        match = re.search(r"(\d{2,3})\%", user_message)
+        if match:
+            percent = int(match.group(1))
+        if cached_df is None:
+            response = "No movement data loaded. Please upload a CSV first."
+            chat_history = chat_history + [{"role": "user", "content": user_message}]
+            chat_history = chat_history + [{"role": "assistant", "content": response}]
+            return chat_history, gr.update()
+        else:
+            # Save the cached_df to a CSV (overwrite previous if exists)
+            input_csv = "uploads/latest.csv"
+            cached_df.to_csv(input_csv, index=False)
+            output_dir = "outputs"
+            os.makedirs(output_dir, exist_ok=True)
+            # Remove previous MCP outputs
+            for f in glob.glob(os.path.join(output_dir, "hr_*_mcp.geojson")):
+                os.remove(f)
+            # Call the R script (assume your script supports method/level args)
+            try:
+                subprocess.run([
+                    "Rscript", "build_home_range_dbbmm.R", input_csv, output_dir, "mcp", str(percent)
+                ], check=True)
+                geojsons = glob.glob(os.path.join(output_dir, "hr_*_mcp.geojson"))
+                geojson_files = geojsons
+            except Exception as e:
+                response = f"Failed to calculate MCP: {e}"
+                chat_history = chat_history + [{"role": "user", "content": user_message}]
+                chat_history = chat_history + [{"role": "assistant", "content": response}]
+                return chat_history, gr.update()
+            if geojson_files:
+                # Overlay all MCPs found
+                map_html = handle_upload_confirm("longitude", "latitude", "")
+                m = folium.Map(location=[cached_df['latitude'].mean(), cached_df['longitude'].mean()], zoom_start=6)
+                folium.TileLayer("OpenStreetMap").add_to(m)
+                for gj in geojson_files:
+                    folium.GeoJson(gj, name=os.path.basename(gj), style_function=lambda x: {
+                        "color": "#FF0000",
+                        "weight": 2,
+                        "fillOpacity": 0.2
+                    }).add_to(m)
+                folium.LayerControl(collapsed=False).add_to(m)
+                new_map = m._repr_html_()
+                response = f"MCP {percent}% calculated and displayed on the map."
+            else:
+                new_map = handle_upload_confirm("longitude", "latitude", "")
+                response = "No MCP output produced by the R script."
+        chat_history = chat_history + [{"role": "user", "content": user_message}]
+        chat_history = chat_history + [{"role": "assistant", "content": response}]
+        return chat_history, gr.update(value=new_map)
+    else:
+        response = f"SpatChat says: You asked '{user_message}' (feature under development)"
+        chat_history = chat_history + [{"role": "user", "content": user_message}]
+        chat_history = chat_history + [{"role": "assistant", "content": response}]
+        return chat_history, gr.update()
 
 with gr.Blocks() as demo:
     gr.Markdown("## SpatChat: Home Range - Movement Preview")
@@ -161,7 +232,6 @@ with gr.Blocks() as demo:
                 value=[{"role": "assistant", "content": "Welcome to SpatChat! Please upload a CSV containing coordinates (lat/lon or UTM) and optional timestamp/animal_id to begin."}]
             )
             user_input = gr.Textbox(label=None, placeholder="Ask SpatChat...", lines=1)
-            send_btn = gr.Button("Send")
             file_input = gr.File(label="Upload Movement CSV")
             x_col = gr.Dropdown(label="X column", choices=[], visible=False)
             y_col = gr.Dropdown(label="Y column", choices=[], visible=False)
@@ -170,7 +240,6 @@ with gr.Blocks() as demo:
         with gr.Column(scale=3):
             map_output = gr.HTML(label="Map Preview", value=render_empty_map(), show_label=False)
 
-    # Connections
     file_input.change(
         fn=handle_upload_initial,
         inputs=file_input,
@@ -184,15 +253,10 @@ with gr.Blocks() as demo:
         inputs=[x_col, y_col, crs_input],
         outputs=map_output
     )
-    send_btn.click(
-        fn=handle_chat,
-        inputs=[chatbot, user_input],
-        outputs=chatbot
-    )
     user_input.submit(
         fn=handle_chat,
         inputs=[chatbot, user_input],
-        outputs=chatbot
+        outputs=[chatbot, map_output]
     )
 
 demo.launch()
