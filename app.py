@@ -12,6 +12,9 @@ from pyproj import CRS, Transformer
 from together import Together
 from dotenv import load_dotenv
 
+import shutil
+print("Rscript path at startup:", shutil.which("Rscript"))
+
 # ========== LLM SETUP (Together API) ==========
 
 load_dotenv()
@@ -193,11 +196,13 @@ def handle_upload_confirm(x_col, y_col, crs_input):
 
 def handle_chat(chat_history, user_message):
     global cached_df
+    import shutil
+    rscript_path = shutil.which("Rscript")
+    print("Rscript path before call:", rscript_path)
     tool, llm_output = ask_llm(chat_history, user_message)
     if tool and tool.get("tool") == "home_range":
         method = tool.get("method")
         percent = tool.get("level", 95)
-        # animal_id = tool.get("animal_id", None) # (future: filter for animal)
         input_csv = "uploads/latest.csv"
         cached_df.to_csv(input_csv, index=False)
         output_dir = "outputs"
@@ -206,7 +211,7 @@ def handle_chat(chat_history, user_message):
             os.remove(f)
         try:
             subprocess.run([
-                "Rscript", "build_home_range_dbbmm.R", input_csv, output_dir, method, str(percent)
+                rscript_path or "Rscript", "build_home_range_dbbmm.R", input_csv, output_dir, method, str(percent)
             ], check=True)
             geojsons = glob.glob(os.path.join(output_dir, f"hr_*_{method}.geojson"))
         except Exception as e:
