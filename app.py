@@ -7,6 +7,38 @@ import random
 from pyproj import CRS, Transformer
 import subprocess
 import glob
+from transformers import pipeline
+import json
+import re
+
+# ----- LLM SETUP (adjust as needed) -----
+system_prompt = """
+You are SpatChat, an expert wildlife movement analysis assistant.
+If the user asks for a home range calculation (MCP, KDE, dBBMM, AKDE, etc.), reply in JSON using this format:
+  {"action": "home_range", "type": "mcp", "level": 95}
+  - type: one of "mcp", "kde", "akde", "bbmm", "dbbmm"
+  - level: the requested percent (default 95 if user doesn't specify)
+Otherwise, answer conversationally as an expert in movement ecology.
+"""
+# Replace with your actual Llama pipeline:
+llama = pipeline('text-generation', model='your-llama-model-name')  # Update with your setup
+
+def ask_llm(chat_history, user_input):
+    prompt = system_prompt + "\n" + "\n".join(
+        [f"User: {m['content']}" if m['role']=='user' else f"Assistant: {m['content']}" for m in chat_history]
+    ) + f"\nUser: {user_input}\nAssistant:"
+    output = llama(prompt, max_new_tokens=512)[0]['generated_text']
+    # Try to find a JSON object in the output:
+    try:
+        match = re.search(r"\{.*?\}", output, re.DOTALL)
+        if match:
+            action_json = json.loads(match.group(0))
+            return action_json, output
+    except Exception:
+        pass
+    return None, output.strip()
+
+# ----- END LLM SETUP -----
 
 cached_df = None
 cached_headers = []
@@ -143,82 +175,48 @@ def handle_upload_confirm(x_col, y_col, crs_input):
 
     return m._repr_html_()
 
-def overlay_geojson_on_map(map_html, geojson_files):
-    from bs4 import BeautifulSoup
-    m = folium.Map(location=[0, 0], zoom_start=2, control_scale=True)
-    # The input map_html is a raw HTML string from folium._repr_html_()
-    # We'll re-create the map and overlay GeoJSONs for accuracy.
-    # In practice, you may want to store the latest folium.Map object for direct access.
-    # For now, let's assume the map is already in the right location and layers.
-    # Overlay each geojson
-    for gj in geojson_files:
-        folium.GeoJson(gj, name=os.path.basename(gj)).add_to(m)
-    folium.LayerControl(collapsed=False).add_to(m)
-    return m._repr_html_()
-
 def handle_chat(chat_history, user_message):
     global cached_df
-    user_message = user_message.strip()
-    response = ""
-    percent = 95  # Default
-    geojson_files = []
-    new_map = None
-
-    if user_message.lower().startswith("mcp"):
-        import re
-        match = re.search(r"(\d{2,3})\%", user_message)
-        if match:
-            percent = int(match.group(1))
-        if cached_df is None:
-            response = "No movement data loaded. Please upload a CSV first."
+    action, llm_output = ask_llm(chat_history, user_message)
+    if action and action.get("action") == "home_range":
+        hr_type = action.get("type")
+        percent = action.get("level", 95)
+        # Run your R script
+        input_csv = "uploads/latest.csv"
+        cached_df.to_csv(input_csv, index=False)
+        output_dir = "outputs"
+        os.makedirs(output_dir, exist_ok=True)
+        # Clean previous outputs of this type
+        for f in glob.glob(os.path.join(output_dir, f"hr_*_{hr_type}.geojson")):
+            os.remove(f)
+        try:
+            subprocess.run([
+                "Rscript", "build_home_range_dbbmm.R", input_csv, output_dir, hr_type, str(percent)
+            ], check=True)
+            geojsons = glob.glob(os.path.join(output_dir, f"hr_*_{hr_type}.geojson"))
+        except Exception as e:
             chat_history = chat_history + [{"role": "user", "content": user_message}]
-            chat_history = chat_history + [{"role": "assistant", "content": response}]
+            chat_history = chat_history + [{"role": "assistant", "content": f"Failed to calculate {hr_type.upper()}: {e}"}]
             return chat_history, gr.update()
+        if geojsons:
+            m = folium.Map(location=[cached_df['latitude'].mean(), cached_df['longitude'].mean()], zoom_start=6)
+            folium.TileLayer("OpenStreetMap").add_to(m)
+            for gj in geojsons:
+                folium.GeoJson(gj, name=os.path.basename(gj), style_function=lambda x: {
+                    "color": "#FF0000", "weight": 2, "fillOpacity": 0.2
+                }).add_to(m)
+            folium.LayerControl(collapsed=False).add_to(m)
+            map_html = m._repr_html_()
+            chat_history = chat_history + [{"role": "user", "content": user_message}]
+            chat_history = chat_history + [{"role": "assistant", "content": f"{hr_type.upper()} {percent}% home range calculated and displayed on the map."}]
+            return chat_history, gr.update(value=map_html)
         else:
-            # Save the cached_df to a CSV (overwrite previous if exists)
-            input_csv = "uploads/latest.csv"
-            cached_df.to_csv(input_csv, index=False)
-            output_dir = "outputs"
-            os.makedirs(output_dir, exist_ok=True)
-            # Remove previous MCP outputs
-            for f in glob.glob(os.path.join(output_dir, "hr_*_mcp.geojson")):
-                os.remove(f)
-            # Call the R script (assume your script supports method/level args)
-            try:
-                subprocess.run([
-                    "Rscript", "build_home_range_dbbmm.R", input_csv, output_dir, "mcp", str(percent)
-                ], check=True)
-                geojsons = glob.glob(os.path.join(output_dir, "hr_*_mcp.geojson"))
-                geojson_files = geojsons
-            except Exception as e:
-                response = f"Failed to calculate MCP: {e}"
-                chat_history = chat_history + [{"role": "user", "content": user_message}]
-                chat_history = chat_history + [{"role": "assistant", "content": response}]
-                return chat_history, gr.update()
-            if geojson_files:
-                # Overlay all MCPs found
-                map_html = handle_upload_confirm("longitude", "latitude", "")
-                m = folium.Map(location=[cached_df['latitude'].mean(), cached_df['longitude'].mean()], zoom_start=6)
-                folium.TileLayer("OpenStreetMap").add_to(m)
-                for gj in geojson_files:
-                    folium.GeoJson(gj, name=os.path.basename(gj), style_function=lambda x: {
-                        "color": "#FF0000",
-                        "weight": 2,
-                        "fillOpacity": 0.2
-                    }).add_to(m)
-                folium.LayerControl(collapsed=False).add_to(m)
-                new_map = m._repr_html_()
-                response = f"MCP {percent}% calculated and displayed on the map."
-            else:
-                new_map = handle_upload_confirm("longitude", "latitude", "")
-                response = "No MCP output produced by the R script."
-        chat_history = chat_history + [{"role": "user", "content": user_message}]
-        chat_history = chat_history + [{"role": "assistant", "content": response}]
-        return chat_history, gr.update(value=new_map)
+            chat_history = chat_history + [{"role": "user", "content": user_message}]
+            chat_history = chat_history + [{"role": "assistant", "content": f"No {hr_type.upper()} output produced by the R script."}]
+            return chat_history, gr.update()
     else:
-        response = f"SpatChat says: You asked '{user_message}' (feature under development)"
         chat_history = chat_history + [{"role": "user", "content": user_message}]
-        chat_history = chat_history + [{"role": "assistant", "content": response}]
+        chat_history = chat_history + [{"role": "assistant", "content": llm_output.strip()}]
         return chat_history, gr.update()
 
 with gr.Blocks() as demo:
