@@ -1,44 +1,60 @@
+import os
+import re
+import json
 import gradio as gr
 import pandas as pd
 import folium
-import os
 import shutil
 import random
-from pyproj import CRS, Transformer
 import subprocess
 import glob
-from transformers import pipeline
-import json
-import re
+from pyproj import CRS, Transformer
+from together import Together
+from dotenv import load_dotenv
 
-# ----- LLM SETUP (adjust as needed) -----
-system_prompt = """
-You are SpatChat, an expert wildlife movement analysis assistant.
-If the user asks for a home range calculation (MCP, KDE, dBBMM, AKDE, etc.), reply in JSON using this format:
-  {"action": "home_range", "type": "mcp", "level": 95}
-  - type: one of "mcp", "kde", "akde", "bbmm", "dbbmm"
-  - level: the requested percent (default 95 if user doesn't specify)
-Otherwise, answer conversationally as an expert in movement ecology.
+# ========== LLM SETUP (Together API) ==========
+
+load_dotenv()
+client = Together(api_key=os.getenv("TOGETHER_API_KEY"))
+
+SYSTEM_PROMPT = """
+You are SpatChat, an expert wildlife home range analysis assistant.
+If the user asks for a home range calculation (MCP, KDE, dBBMM, AKDE, etc.), reply ONLY in JSON using this format:
+{"tool": "home_range", "method": "mcp", "level": 95}
+- method: one of "mcp", "kde", "akde", "bbmm", "dbbmm"
+- level: percentage for the home range (default 95 if user doesn't specify)
+- Optionally, include animal_id if the user specifies a particular animal.
+For any other questions, answer as an expert movement ecologist in plain text (keep to 2-3 sentences).
 """
-# Replace with your actual Llama pipeline:
-llama = pipeline('text-generation', model='your-llama-model-name')  # Update with your setup
+FALLBACK_PROMPT = """
+You are SpatChat, a wildlife movement expert.
+If you can't map a request to a home range tool, just answer naturally.
+Keep replies under three sentences.
+"""
 
 def ask_llm(chat_history, user_input):
-    prompt = system_prompt + "\n" + "\n".join(
-        [f"User: {m['content']}" if m['role']=='user' else f"Assistant: {m['content']}" for m in chat_history]
-    ) + f"\nUser: {user_input}\nAssistant:"
-    output = llama(prompt, max_new_tokens=512)[0]['generated_text']
-    # Try to find a JSON object in the output:
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    for m in chat_history:
+        messages.append({"role": m["role"], "content": m["content"]})
+    messages.append({"role": "user", "content": user_input})
+    resp = client.chat.completions.create(
+        model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
+        messages=messages,
+        temperature=0.0
+    ).choices[0].message.content
     try:
-        match = re.search(r"\{.*?\}", output, re.DOTALL)
-        if match:
-            action_json = json.loads(match.group(0))
-            return action_json, output
+        call = json.loads(resp)
+        return call, resp
     except Exception:
-        pass
-    return None, output.strip()
+        # fallback: try conversational response
+        conv = client.chat.completions.create(
+            model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
+            messages=[{"role": "system", "content": FALLBACK_PROMPT}] + messages,
+            temperature=0.7
+        ).choices[0].message.content
+        return None, conv
 
-# ----- END LLM SETUP -----
+# ========== App Logic ==========
 
 cached_df = None
 cached_headers = []
@@ -177,26 +193,25 @@ def handle_upload_confirm(x_col, y_col, crs_input):
 
 def handle_chat(chat_history, user_message):
     global cached_df
-    action, llm_output = ask_llm(chat_history, user_message)
-    if action and action.get("action") == "home_range":
-        hr_type = action.get("type")
-        percent = action.get("level", 95)
-        # Run your R script
+    tool, llm_output = ask_llm(chat_history, user_message)
+    if tool and tool.get("tool") == "home_range":
+        method = tool.get("method")
+        percent = tool.get("level", 95)
+        # animal_id = tool.get("animal_id", None) # (future: filter for animal)
         input_csv = "uploads/latest.csv"
         cached_df.to_csv(input_csv, index=False)
         output_dir = "outputs"
         os.makedirs(output_dir, exist_ok=True)
-        # Clean previous outputs of this type
-        for f in glob.glob(os.path.join(output_dir, f"hr_*_{hr_type}.geojson")):
+        for f in glob.glob(os.path.join(output_dir, f"hr_*_{method}.geojson")):
             os.remove(f)
         try:
             subprocess.run([
-                "Rscript", "build_home_range_dbbmm.R", input_csv, output_dir, hr_type, str(percent)
+                "Rscript", "build_home_range_dbbmm.R", input_csv, output_dir, method, str(percent)
             ], check=True)
-            geojsons = glob.glob(os.path.join(output_dir, f"hr_*_{hr_type}.geojson"))
+            geojsons = glob.glob(os.path.join(output_dir, f"hr_*_{method}.geojson"))
         except Exception as e:
             chat_history = chat_history + [{"role": "user", "content": user_message}]
-            chat_history = chat_history + [{"role": "assistant", "content": f"Failed to calculate {hr_type.upper()}: {e}"}]
+            chat_history = chat_history + [{"role": "assistant", "content": f"Failed to calculate {method.upper()}: {e}"}]
             return chat_history, gr.update()
         if geojsons:
             m = folium.Map(location=[cached_df['latitude'].mean(), cached_df['longitude'].mean()], zoom_start=6)
@@ -208,11 +223,11 @@ def handle_chat(chat_history, user_message):
             folium.LayerControl(collapsed=False).add_to(m)
             map_html = m._repr_html_()
             chat_history = chat_history + [{"role": "user", "content": user_message}]
-            chat_history = chat_history + [{"role": "assistant", "content": f"{hr_type.upper()} {percent}% home range calculated and displayed on the map."}]
+            chat_history = chat_history + [{"role": "assistant", "content": f"{method.upper()} {percent}% home range calculated and displayed on the map."}]
             return chat_history, gr.update(value=map_html)
         else:
             chat_history = chat_history + [{"role": "user", "content": user_message}]
-            chat_history = chat_history + [{"role": "assistant", "content": f"No {hr_type.upper()} output produced by the R script."}]
+            chat_history = chat_history + [{"role": "assistant", "content": f"No {method.upper()} output produced by the R script."}]
             return chat_history, gr.update()
     else:
         chat_history = chat_history + [{"role": "user", "content": user_message}]
