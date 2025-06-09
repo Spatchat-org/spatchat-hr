@@ -1,4 +1,5 @@
-# app.py — Chatbot greeting + map upload with CRS fallback
+# app.py — SpatChat: Home Range Analysis + Chatbot Input
+
 import gradio as gr
 import pandas as pd
 import folium
@@ -49,21 +50,21 @@ def handle_upload_initial(file):
         cached_df = df
         cached_headers = list(df.columns)
     except Exception as e:
-        return [], gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), render_empty_map()
+        return [], gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), render_empty_map(), gr.update(visible=False)
 
     lower_cols = [col.lower() for col in df.columns]
     if "latitude" in lower_cols and "longitude" in lower_cols:
         return [
             {"role": "assistant", "content": "CSV uploaded successfully. Latitude and longitude detected. You may now proceed to create home ranges."}
-        ], gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), handle_upload_confirm("longitude", "latitude", "")
+        ], gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), handle_upload_confirm("longitude", "latitude", ""), gr.update(visible=False)
 
     # Heuristic for best guesses
     preferred_x = next((col for col in df.columns if col.lower() in ["x", "easting"]), df.columns[0])
     preferred_y = next((col for col in df.columns if col.lower() in ["y", "northing"]), df.columns[1] if len(df.columns) > 1 else df.columns[0])
 
     return [
-        {"role": "assistant", "content": "CSV uploaded. Coordinate columns not clearly labeled. Please confirm X/Y columns and provide a CRS if needed."}
-    ], gr.update(choices=cached_headers, value=preferred_x, visible=True), gr.update(choices=cached_headers, value=preferred_y, visible=True), gr.update(visible=True), render_empty_map()
+        {"role": "assistant", "content": "CSV uploaded. Coordinate columns not clearly labeled. Please confirm X/Y columns and provide a CRS if needed. Be sure to click the Confirm button after filling these fields."}
+    ], gr.update(choices=cached_headers, value=preferred_x, visible=True), gr.update(choices=cached_headers, value=preferred_y, visible=True), gr.update(visible=True), render_empty_map(), gr.update(visible=True)
 
 def handle_upload_confirm(x_col, y_col, crs_input):
     global cached_df
@@ -138,21 +139,56 @@ def handle_upload_confirm(x_col, y_col, crs_input):
 
     return m._repr_html_()
 
+def handle_chat(chat_history, user_message):
+    # Placeholder: just echo for now
+    if not user_message.strip():
+        return chat_history
+    response = f"SpatChat says: You asked '{user_message}' (feature under development)"
+    chat_history = chat_history + [{"role": "user", "content": user_message}]
+    chat_history = chat_history + [{"role": "assistant", "content": response}]
+    return chat_history
+
 with gr.Blocks() as demo:
     gr.Markdown("## SpatChat: Home Range - Movement Preview")
     with gr.Row():
         with gr.Column(scale=3):
             map_output = gr.HTML(label="Map Preview", value=render_empty_map(), show_label=False)
         with gr.Column(scale=2):
-            chatbot = gr.Chatbot(label="SpatChat", show_label=True, type="messages", value=[
-                {"role": "assistant", "content": "Welcome to SpatChat! Please upload a CSV containing coordinates (lat/lon or UTM) and optional timestamp/animal_id to begin."}
-            ])
+            chatbot = gr.Chatbot(
+                label="SpatChat",
+                show_label=True,
+                type="messages",
+                value=[{"role": "assistant", "content": "Welcome to SpatChat! Please upload a CSV containing coordinates (lat/lon or UTM) and optional timestamp/animal_id to begin."}]
+            )
             file_input = gr.File(label="Upload Movement CSV")
             x_col = gr.Dropdown(label="X column", choices=[], visible=False)
             y_col = gr.Dropdown(label="Y column", choices=[], visible=False)
             crs_input = gr.Text(label="CRS (e.g. '32633', '33N', or 'EPSG:32633')", visible=False)
             confirm_btn = gr.Button("Confirm Coordinate Settings", visible=False)
-            file_input.change(fn=handle_upload_initial, inputs=file_input, outputs=[chatbot, x_col, y_col, crs_input, map_output])
-            confirm_btn.click(fn=handle_upload_confirm, inputs=[x_col, y_col, crs_input], outputs=map_output)
+            user_input = gr.Textbox(label="Ask SpatChat", placeholder="Type your question here…", lines=1)
+            send_btn = gr.Button("Send")
+            # File upload triggers initial processing (and possible column selection)
+            file_input.change(
+                fn=handle_upload_initial,
+                inputs=file_input,
+                outputs=[chatbot, x_col, y_col, crs_input, map_output, confirm_btn]
+            )
+            # Confirm button triggers coordinate conversion/map update
+            confirm_btn.click(
+                fn=handle_upload_confirm,
+                inputs=[x_col, y_col, crs_input],
+                outputs=map_output
+            )
+            # Chatbot input and send button
+            send_btn.click(
+                fn=handle_chat,
+                inputs=[chatbot, user_input],
+                outputs=chatbot
+            )
+            user_input.submit(
+                fn=handle_chat,
+                inputs=[chatbot, user_input],
+                outputs=chatbot
+            )
 
 demo.launch()
