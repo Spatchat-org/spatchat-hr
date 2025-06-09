@@ -1,5 +1,3 @@
-# app.py — SpatChat: Home Range Analysis + Chatbot Input
-
 import gradio as gr
 import pandas as pd
 import folium
@@ -154,32 +152,34 @@ with gr.Blocks() as demo:
         with gr.Column(scale=3):
             map_output = gr.HTML(label="Map Preview", value=render_empty_map(), show_label=False)
         with gr.Column(scale=2):
-            chatbot = gr.Chatbot(
-                label="SpatChat",
-                show_label=True,
-                type="messages",
-                value=[{"role": "assistant", "content": "Welcome to SpatChat! Please upload a CSV containing coordinates (lat/lon or UTM) and optional timestamp/animal_id to begin."}]
-            )
+            with gr.Row():
+                chatbot = gr.Chatbot(
+                    label="SpatChat",
+                    show_label=True,
+                    type="messages",
+                    value=[{"role": "assistant", "content": "Welcome to SpatChat! Please upload a CSV containing coordinates (lat/lon or UTM) and optional timestamp/animal_id to begin."}]
+                )
+            with gr.Row():
+                user_input = gr.Textbox(label=None, placeholder="Ask SpatChat...", lines=1)
+                send_btn = gr.Button("Send")
+            # Movement Data UI
             file_input = gr.File(label="Upload Movement CSV")
-            x_col = gr.Dropdown(label="X column", choices=[], visible=False)
-            y_col = gr.Dropdown(label="Y column", choices=[], visible=False)
-            crs_input = gr.Text(label="CRS (e.g. '32633', '33N', or 'EPSG:32633')", visible=False)
-            confirm_btn = gr.Button("Confirm Coordinate Settings", visible=False)
-            user_input = gr.Textbox(label="Ask SpatChat", placeholder="Type your question here…", lines=1)
-            send_btn = gr.Button("Send")
-            # File upload triggers initial processing (and possible column selection)
+            with gr.Box(visible=False) as coord_panel:
+                x_col = gr.Dropdown(label="X column", choices=[], visible=False)
+                y_col = gr.Dropdown(label="Y column", choices=[], visible=False)
+                crs_input = gr.Text(label="CRS (e.g. '32633', '33N', or 'EPSG:32633')", visible=False)
+                confirm_btn = gr.Button("Confirm Coordinate Settings", visible=False)
+            # Connect logic
             file_input.change(
                 fn=handle_upload_initial,
                 inputs=file_input,
-                outputs=[chatbot, x_col, y_col, crs_input, map_output, confirm_btn]
+                outputs=[chatbot, x_col, y_col, crs_input, map_output, coord_panel]
             )
-            # Confirm button triggers coordinate conversion/map update
             confirm_btn.click(
                 fn=handle_upload_confirm,
                 inputs=[x_col, y_col, crs_input],
                 outputs=map_output
             )
-            # Chatbot input and send button
             send_btn.click(
                 fn=handle_chat,
                 inputs=[chatbot, user_input],
