@@ -1,19 +1,16 @@
 import os
-import re
 import json
 import gradio as gr
 import pandas as pd
 import folium
 import shutil
 import random
-import glob
-from pyproj import CRS, Transformer
+import numpy as np
+from pyproj import Transformer
 from together import Together
 from dotenv import load_dotenv
 from scipy.spatial import ConvexHull
 from shapely.geometry import Polygon, mapping
-import geopandas as gpd
-import numpy as np
 import zipfile
 
 print("Starting SpatChat (Python-only MCP)")
@@ -23,7 +20,6 @@ mcp_results = {}  # animal_id -> {"polygon": Polygon, "area": area_km2}
 mcp_percent = 95  # Store last-used percent for reporting and export
 
 # ========== LLM SETUP (Together API) ==========
-
 load_dotenv()
 client = Together(api_key=os.getenv("TOGETHER_API_KEY"))
 
@@ -65,9 +61,57 @@ def ask_llm(chat_history, user_input):
         return None, conv
 
 # ========== App Logic ==========
-
 cached_df = None
 cached_headers = []
+
+def render_empty_map():
+    m = folium.Map(location=[0, 0], zoom_start=2, control_scale=True)
+    folium.TileLayer("OpenStreetMap").add_to(m)
+    folium.TileLayer("CartoDB positron", attr='CartoDB').add_to(m)
+    folium.TileLayer(
+        tiles="https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
+        attr="OpenTopoMap", name="Topographic"
+    ).add_to(m)
+    folium.TileLayer(
+        tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        attr="Esri", name="Satellite"
+    ).add_to(m)
+    folium.LayerControl(collapsed=False).add_to(m)
+    return m._repr_html_()
+
+def fit_map_to_bounds(m, df):
+    min_lat, max_lat = df['latitude'].min(), df['latitude'].max()
+    min_lon, max_lon = df['longitude'].min(), df['longitude'].max()
+    if np.isfinite([min_lat, max_lat, min_lon, max_lon]).all():
+        m.fit_bounds([[min_lat, min_lon], [max_lat, max_lon]])
+    return m
+
+def handle_upload_initial(file):
+    global cached_df, cached_headers
+    os.makedirs("uploads", exist_ok=True)
+    filename = os.path.join("uploads", os.path.basename(file))
+    shutil.copy(file, filename)
+    try:
+        df = pd.read_csv(filename)
+        cached_df = df
+        cached_headers = list(df.columns)
+    except Exception as e:
+        return [], gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), render_empty_map(), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False)
+    lower_cols = [col.lower() for col in df.columns]
+    if "latitude" in lower_cols and "longitude" in lower_cols:
+        return [
+            {"role": "assistant", "content": "CSV uploaded successfully. Latitude and longitude detected. You may now proceed to create home ranges."}
+        ], gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), handle_upload_confirm("longitude", "latitude", ""), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False)
+    preferred_x = next((col for col in df.columns if col.lower() in ["x", "easting"]), df.columns[0])
+    preferred_y = next((col for col in df.columns if col.lower() in ["y", "northing"]), df.columns[1] if len(df.columns) > 1 else df.columns[0])
+    return [
+        {"role": "assistant", "content": "CSV uploaded. Coordinate columns not clearly labeled. Please confirm X/Y columns and provide a CRS if needed. Be sure to click the Confirm button after filling these fields."}
+    ], \
+    gr.update(choices=cached_headers, value=preferred_x, visible=True), \
+    gr.update(choices=cached_headers, value=preferred_y, visible=True), \
+    gr.update(visible=True), \
+    render_empty_map(), \
+    gr.update(visible=True), gr.update(visible=True), gr.update(visible=True), gr.update(visible=True)
 
 def parse_crs_input(crs_input):
     crs_input = str(crs_input).strip().upper()
@@ -80,117 +124,49 @@ def parse_crs_input(crs_input):
         return 32600 + zone if crs_input[-1] == "N" else 32700 + zone
     raise ValueError("Invalid CRS input. Use EPSG code or UTM zone like '33N'.")
 
-def render_empty_map():
-    m = folium.Map(location=[0, 0], zoom_start=2, control_scale=True)
-    folium.TileLayer("OpenStreetMap").add_to(m)
-    folium.TileLayer("CartoDB positron", attr='CartoDB').add_to(m)
-    folium.TileLayer(
-        tiles="https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
-        attr="OpenTopoMap",
-        name="Topographic"
-    ).add_to(m)
-    folium.TileLayer(
-        tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-        attr="Esri",
-        name="Satellite"
-    ).add_to(m)
-    folium.LayerControl(collapsed=False).add_to(m)
-    return m._repr_html_()
-
-def fit_map_to_bounds(m, df):
-    # Fit map to min/max
-    min_lat, max_lat = df['latitude'].min(), df['latitude'].max()
-    min_lon, max_lon = df['longitude'].min(), df['longitude'].max()
-    if np.isfinite([min_lat, max_lat, min_lon, max_lon]).all():
-        m.fit_bounds([[min_lat, min_lon], [max_lat, max_lon]])
-    return m
-
-def handle_upload_initial(file):
-    global cached_df, cached_headers
-    os.makedirs("uploads", exist_ok=True)
-    filename = os.path.join("uploads", os.path.basename(file))
-    shutil.copy(file, filename)
-
-    try:
-        df = pd.read_csv(filename)
-        cached_df = df
-        cached_headers = list(df.columns)
-    except Exception as e:
-        return [], gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), render_empty_map(), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False)
-
-    lower_cols = [col.lower() for col in df.columns]
-    if "latitude" in lower_cols and "longitude" in lower_cols:
-        return [
-            {"role": "assistant", "content": "CSV uploaded successfully. Latitude and longitude detected. You may now proceed to create home ranges."}
-        ], gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), handle_upload_confirm("longitude", "latitude", ""), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False)
-
-    preferred_x = next((col for col in df.columns if col.lower() in ["x", "easting"]), df.columns[0])
-    preferred_y = next((col for col in df.columns if col.lower() in ["y", "northing"]), df.columns[1] if len(df.columns) > 1 else df.columns[0])
-
-    return [
-        {"role": "assistant", "content": "CSV uploaded. Coordinate columns not clearly labeled. Please confirm X/Y columns and provide a CRS if needed. Be sure to click the Confirm button after filling these fields."}
-    ], \
-    gr.update(choices=cached_headers, value=preferred_x, visible=True), \
-    gr.update(choices=cached_headers, value=preferred_y, visible=True), \
-    gr.update(visible=True), \
-    render_empty_map(), \
-    gr.update(visible=True), gr.update(visible=True), gr.update(visible=True), gr.update(visible=True)
-
 def handle_upload_confirm(x_col, y_col, crs_input):
     global cached_df
     df = cached_df.copy()
     if x_col not in df.columns or y_col not in df.columns:
         return "<p>Selected coordinate columns not found in data.</p>"
-
     if x_col.lower() in ["longitude", "lon"] and y_col.lower() in ["latitude", "lat"]:
         df['longitude'] = df[x_col]
         df['latitude'] = df[y_col]
     else:
         try:
             epsg = parse_crs_input(crs_input)
-            transformer = Transformer.from_crs(CRS.from_epsg(epsg), CRS.from_epsg(4326), always_xy=True)
+            transformer = Transformer.from_crs(epsg, 4326, always_xy=True)
             df['longitude'], df['latitude'] = transformer.transform(df[x_col].values, df[y_col].values)
         except Exception as e:
             return f"<p>Failed to convert coordinates: {e}</p>"
-
     has_timestamp = "timestamp" in df.columns
     has_animal_id = "animal_id" in df.columns
     if has_timestamp:
         df["timestamp"] = pd.to_datetime(df["timestamp"])
     if not has_animal_id:
         df["animal_id"] = "sample"
-
-    center = [df["latitude"].mean(), df["longitude"].mean()]
-    m = folium.Map(location=center, zoom_start=9, control_scale=True)
-
+    m = folium.Map(location=[df["latitude"].mean(), df["longitude"].mean()], zoom_start=9, control_scale=True)
     folium.TileLayer("OpenStreetMap").add_to(m)
     folium.TileLayer("CartoDB positron", attr='CartoDB').add_to(m)
     folium.TileLayer(
         tiles="https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
-        attr="OpenTopoMap",
-        name="Topographic"
+        attr="OpenTopoMap", name="Topographic"
     ).add_to(m)
     folium.TileLayer(
         tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-        attr="Esri",
-        name="Satellite"
+        attr="Esri", name="Satellite"
     ).add_to(m)
-
     points_layer = folium.FeatureGroup(name="Points", show=True)
     lines_layer = folium.FeatureGroup(name="Tracks", show=True)
-
     animal_ids = df["animal_id"].unique()
     color_map = {aid: f"#{random.randint(0, 0xFFFFFF):06x}" for aid in animal_ids}
-
     for animal in animal_ids:
         track = df[df["animal_id"] == animal]
         coords = list(zip(track["latitude"], track["longitude"]))
         color = color_map[animal]
-
         if has_timestamp:
             track = track.sort_values("timestamp")
             folium.PolyLine(coords, color=color, weight=2.5, opacity=0.8, popup=animal).add_to(lines_layer)
-
         for _, row in track.iterrows():
             label = f"{animal}" + (f"<br>{row['timestamp']}" if has_timestamp else "")
             folium.CircleMarker(
@@ -201,40 +177,30 @@ def handle_upload_confirm(x_col, y_col, crs_input):
                 fill=True,
                 fill_opacity=0.7
             ).add_to(points_layer)
-
     points_layer.add_to(m)
     if has_timestamp:
         lines_layer.add_to(m)
     folium.LayerControl(collapsed=False).add_to(m)
-
     m = fit_map_to_bounds(m, df)
     return m._repr_html_()
 
 def mcp_polygon(latitudes, longitudes, percent=95):
-    """
-    Compute the MCP polygon for the top `percent` of points by distance from centroid.
-    Returns array of (lon, lat) points forming the MCP (or None if <3 points).
-    """
     points = np.column_stack((longitudes, latitudes))
     if len(points) < 3:
         return None
-
     centroid = points.mean(axis=0)
     dists = np.linalg.norm(points - centroid, axis=1)
     n_keep = max(3, int(len(points) * (percent / 100.0)))
     keep_idx = np.argsort(dists)[:n_keep]
     points_kept = points[keep_idx]
-
     if len(points_kept) < 3:
-        return None  # Cannot form a polygon
-
+        return None
     hull = ConvexHull(points_kept)
     hull_points = points_kept[hull.vertices]
     return hull_points
 
 def handle_chat(chat_history, user_message):
     global cached_df, mcp_results, mcp_percent
-
     # Respond to "area" or "mcp area"
     if "area" in user_message.lower():
         if not mcp_results:
@@ -245,56 +211,43 @@ def handle_chat(chat_history, user_message):
             response = f"### MCP Areas ({mcp_percent}% MCP)\n{header}\n{rows}"
         chat_history = chat_history + [{"role": "user", "content": user_message}]
         chat_history = chat_history + [{"role": "assistant", "content": response}]
-        return chat_history, gr.update(), ""
-
+        return chat_history, gr.update(), ""  # Last output resets user_input
     tool, llm_output = ask_llm(chat_history, user_message)
     if tool and tool.get("tool") == "home_range" and tool.get("method") == "mcp":
         percent = tool.get("level", 95)
-        mcp_percent = percent  # store last-used percent
+        mcp_percent = percent
         df = cached_df
         if df is None or "latitude" not in df or "longitude" not in df:
             chat_history = chat_history + [{"role": "user", "content": user_message}]
             chat_history = chat_history + [{"role": "assistant", "content": "CSV must be uploaded with 'latitude' and 'longitude' columns."}]
             return chat_history, gr.update(), ""
-
         if "animal_id" not in df.columns:
             df["animal_id"] = "sample"
-
-        mcp_results.clear()  # Clear old results
-
+        mcp_results.clear()
         m = folium.Map(location=[df['latitude'].mean(), df['longitude'].mean()], zoom_start=9)
         folium.TileLayer("OpenStreetMap").add_to(m)
         folium.TileLayer("CartoDB positron", attr='CartoDB').add_to(m)
         folium.TileLayer(
             tiles="https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
-            attr="OpenTopoMap",
-            name="Topographic"
+            attr="OpenTopoMap", name="Topographic"
         ).add_to(m)
         folium.TileLayer(
             tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-            attr="Esri",
-            name="Satellite"
+            attr="Esri", name="Satellite"
         ).add_to(m)
-
         points_layer = folium.FeatureGroup(name="Points", show=True)
         mcps_layer = folium.FeatureGroup(name="MCP Polygons", show=True)
         paths_layer = folium.FeatureGroup(name="Tracks", show=True)
-
         animal_ids = df["animal_id"].unique()
         color_map = {aid: f"#{random.randint(0, 0xFFFFFF):06x}" for aid in animal_ids}
-
-        # Set up projection for area: EPSG:3857 (meters)
         transformer = Transformer.from_crs("epsg:4326", "epsg:3857", always_xy=True)
-
         for animal in animal_ids:
             track = df[df["animal_id"] == animal]
             color = color_map[animal]
-
             # Paths
             if len(track) > 1:
                 coords = list(zip(track["latitude"], track["longitude"]))
                 folium.PolyLine(coords, color=color, weight=2.5, opacity=0.8, popup=f"{animal} Track").add_to(paths_layer)
-
             # Points
             for idx, row in track.iterrows():
                 folium.CircleMarker(
@@ -305,11 +258,9 @@ def handle_chat(chat_history, user_message):
                     fill_opacity=0.7,
                     popup=f"{animal}"
                 ).add_to(points_layer)
-
             # MCP for each animal
             hull_points = mcp_polygon(track['latitude'].values, track['longitude'].values, percent)
             if hull_points is not None:
-                # Folium: (lat, lon); Shapely: (lon, lat)
                 coords_lonlat = [(lon, lat) for lon, lat in hull_points]
                 coords_proj = [transformer.transform(lon, lat) for lon, lat in coords_lonlat]
                 poly = Polygon(coords_proj)
@@ -322,18 +273,15 @@ def handle_chat(chat_history, user_message):
                     fill_opacity=0.2,
                     popup=f"{animal} MCP {percent}%"
                 ).add_to(mcps_layer)
-
         points_layer.add_to(m)
         mcps_layer.add_to(m)
         paths_layer.add_to(m)
         folium.LayerControl(collapsed=False).add_to(m)
-
         m = fit_map_to_bounds(m, df)
         map_html = m._repr_html_()
         chat_history = chat_history + [{"role": "user", "content": user_message}]
         chat_history = chat_history + [{"role": "assistant", "content": f"MCP {percent}% home ranges calculated for each animal and displayed on the map. Click 'Download Results' below the map to export GeoJSON + CSV."}]
         return chat_history, gr.update(value=map_html), ""
-
     else:
         chat_history = chat_history + [{"role": "user", "content": user_message}]
         chat_history = chat_history + [{"role": "assistant", "content": llm_output.strip()}]
@@ -358,7 +306,6 @@ def download_mcp_zip():
     geojson_path = os.path.join("outputs", "mcps.geojson")
     with open(geojson_path, "w") as f:
         json.dump(geojson, f)
-
     # CSV
     csv_path = os.path.join("outputs", "mcp_areas.csv")
     df = pd.DataFrame(
@@ -366,7 +313,6 @@ def download_mcp_zip():
         columns=["animal_id", "area_km2"]
     )
     df.to_csv(csv_path, index=False)
-
     # ZIP
     zip_path = os.path.join("outputs", "spatchat_results.zip")
     with zipfile.ZipFile(zip_path, "w") as zipf:
@@ -392,7 +338,7 @@ with gr.Blocks() as demo:
             confirm_btn = gr.Button("Confirm Coordinate Settings", visible=False)
         with gr.Column(scale=3):
             map_output = gr.HTML(label="Map Preview", value=render_empty_map(), show_label=False)
-            download_btn = gr.Button("Download Results (GeoJSON + CSV as ZIP)")
+            download_btn = gr.DownloadButton("Download Results (GeoJSON + CSV as ZIP)", file_name="spatchat_results.zip")
 
     file_input.change(
         fn=handle_upload_initial,
@@ -410,18 +356,12 @@ with gr.Blocks() as demo:
     user_input.submit(
         fn=handle_chat,
         inputs=[chatbot, user_input],
-        outputs=[chatbot, map_output, user_input]  # Reset textbox after submit
+        outputs=[chatbot, map_output, user_input]  # Last output resets textbox
     )
     download_btn.click(
         fn=download_mcp_zip,
-        outputs=gr.File()
-    )
-
-    # Clear input after submit (Gradio 3.x/4.x/5.x: set value to "")
-    user_input.change(
-        fn=lambda _: "",
-        inputs=user_input,
-        outputs=user_input
+        inputs=None,
+        outputs=download_btn
     )
 
 demo.launch()
