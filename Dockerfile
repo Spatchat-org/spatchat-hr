@@ -26,7 +26,7 @@ RUN apt-get update && \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Install R CRAN packages that are NOT in apt (add more as needed)
-RUN Rscript -e "install.packages(c('adehabitatHR'), repos='https://cloud.r-project.org')"
+RUN Rscript -e "install.packages(c('adehabitatHR','move','sf','raster','dplyr'), dependencies=TRUE, repos='https://cloud.r-project.org')"
 
 # Install Python dependencies
 COPY requirements.txt .
