@@ -1,25 +1,3 @@
-import subprocess
-import os
-
-print("PATH:", os.environ.get("PATH"))
-print("Files in /usr/bin:", os.listdir("/usr/bin"))
-
-
-def r_package_installed(pkg):
-    try:
-        subprocess.run(
-            ['Rscript', '-e', f"stopifnot(requireNamespace('{pkg}', quietly=TRUE))"],
-            check=True,
-            capture_output=True
-        )
-        return True
-    except Exception:
-        return False
-
-if not r_package_installed('adehabitatHR'):
-    print("Running install.R to install missing R packages...")
-    subprocess.run(["Rscript", "install.R"], check=True)
-
 import os
 import re
 import json
@@ -28,15 +6,14 @@ import pandas as pd
 import folium
 import shutil
 import random
-import subprocess
 import glob
 from pyproj import CRS, Transformer
 from together import Together
 from dotenv import load_dotenv
+from scipy.spatial import ConvexHull
+from shapely.geometry import Polygon, mapping, Point
 
-import shutil
-print("Rscript path at startup:", shutil.which("Rscript"))
-
+print("Starting SpatChat (Python-only MCP)")
 
 # ========== LLM SETUP (Together API) ==========
 
@@ -217,46 +194,74 @@ def handle_upload_confirm(x_col, y_col, crs_input):
 
     return m._repr_html_()
 
+def mcp_polygon(latitudes, longitudes, percent=95):
+    """
+    Compute the MCP polygon for the top `percent` of points by distance from centroid.
+    """
+    import numpy as np
+
+    points = np.column_stack((longitudes, latitudes))
+    centroid = points.mean(axis=0)
+
+    # Calculate distances to centroid
+    dists = np.linalg.norm(points - centroid, axis=1)
+    # Get indices for the closest `percent` of points
+    n_keep = max(3, int(len(points) * (percent / 100.0)))
+    keep_idx = np.argsort(dists)[:n_keep]
+    points_kept = points[keep_idx]
+
+    if len(points_kept) < 3:
+        return None  # Cannot form a polygon
+
+    hull = ConvexHull(points_kept)
+    hull_points = points_kept[hull.vertices]
+    return hull_points
+
 def handle_chat(chat_history, user_message):
     global cached_df
-    import shutil
-    rscript_path = shutil.which("Rscript")
-    print("Rscript path before call:", rscript_path)
     tool, llm_output = ask_llm(chat_history, user_message)
-    if tool and tool.get("tool") == "home_range":
-        method = tool.get("method")
+    if tool and tool.get("tool") == "home_range" and tool.get("method") == "mcp":
         percent = tool.get("level", 95)
-        input_csv = "uploads/latest.csv"
-        cached_df.to_csv(input_csv, index=False)
-        output_dir = "outputs"
-        os.makedirs(output_dir, exist_ok=True)
-        for f in glob.glob(os.path.join(output_dir, f"hr_*_{method}.geojson")):
-            os.remove(f)
-        try:
-            subprocess.run([
-                rscript_path or "Rscript", "build_home_range_dbbmm.R", input_csv, output_dir, method, str(percent)
-            ], check=True)
-            geojsons = glob.glob(os.path.join(output_dir, f"hr_*_{method}.geojson"))
-        except Exception as e:
+        df = cached_df
+        if df is None or "latitude" not in df or "longitude" not in df:
             chat_history = chat_history + [{"role": "user", "content": user_message}]
-            chat_history = chat_history + [{"role": "assistant", "content": f"Failed to calculate {method.upper()}: {e}"}]
+            chat_history = chat_history + [{"role": "assistant", "content": "CSV must be uploaded with 'latitude' and 'longitude' columns."}]
             return chat_history, gr.update()
-        if geojsons:
-            m = folium.Map(location=[cached_df['latitude'].mean(), cached_df['longitude'].mean()], zoom_start=6)
-            folium.TileLayer("OpenStreetMap").add_to(m)
-            for gj in geojsons:
-                folium.GeoJson(gj, name=os.path.basename(gj), style_function=lambda x: {
-                    "color": "#FF0000", "weight": 2, "fillOpacity": 0.2
-                }).add_to(m)
-            folium.LayerControl(collapsed=False).add_to(m)
-            map_html = m._repr_html_()
+
+        # For now, only support all points (not per-animal)
+        hull_points = mcp_polygon(df['latitude'].values, df['longitude'].values, percent)
+        if hull_points is None:
             chat_history = chat_history + [{"role": "user", "content": user_message}]
-            chat_history = chat_history + [{"role": "assistant", "content": f"{method.upper()} {percent}% home range calculated and displayed on the map."}]
-            return chat_history, gr.update(value=map_html)
-        else:
-            chat_history = chat_history + [{"role": "user", "content": user_message}]
-            chat_history = chat_history + [{"role": "assistant", "content": f"No {method.upper()} output produced by the R script."}]
+            chat_history = chat_history + [{"role": "assistant", "content": "Not enough points for MCP."}]
             return chat_history, gr.update()
+
+        m = folium.Map(location=[df['latitude'].mean(), df['longitude'].mean()], zoom_start=6)
+        folium.TileLayer("OpenStreetMap").add_to(m)
+
+        # Plot all points
+        for idx, row in df.iterrows():
+            folium.CircleMarker(
+                location=[row['latitude'], row['longitude']],
+                radius=3,
+                color="#3388ff",
+                fill=True,
+                fill_opacity=0.7
+            ).add_to(m)
+
+        # Plot MCP polygon
+        folium.Polygon(
+            locations=[(lat, lon) for lon, lat in hull_points],
+            color='red',
+            fill=True,
+            fill_opacity=0.2,
+            popup=f"MCP {percent}%"
+        ).add_to(m)
+
+        folium.LayerControl(collapsed=False).add_to(m)
+        map_html = m._repr_html_()
+        chat_history = chat_history + [{"role": "user", "content": user_message}]
+        chat_history = chat_history + [{"role": "assistant", "content": f"MCP {percent}% home range calculated and displayed on the map."}]
+        return chat_history, gr.update(value=map_html)
     else:
         chat_history = chat_history + [{"role": "user", "content": user_message}]
         chat_history = chat_history + [{"role": "assistant", "content": llm_output.strip()}]
