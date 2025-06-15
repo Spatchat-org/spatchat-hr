@@ -197,15 +197,16 @@ def handle_upload_confirm(x_col, y_col, crs_input):
 def mcp_polygon(latitudes, longitudes, percent=95):
     """
     Compute the MCP polygon for the top `percent` of points by distance from centroid.
+    Returns array of (lon, lat) points forming the MCP (or None if <3 points).
     """
     import numpy as np
 
     points = np.column_stack((longitudes, latitudes))
-    centroid = points.mean(axis=0)
+    if len(points) < 3:
+        return None
 
-    # Calculate distances to centroid
+    centroid = points.mean(axis=0)
     dists = np.linalg.norm(points - centroid, axis=1)
-    # Get indices for the closest `percent` of points
     n_keep = max(3, int(len(points) * (percent / 100.0)))
     keep_idx = np.argsort(dists)[:n_keep]
     points_kept = points[keep_idx]
@@ -213,6 +214,7 @@ def mcp_polygon(latitudes, longitudes, percent=95):
     if len(points_kept) < 3:
         return None  # Cannot form a polygon
 
+    from scipy.spatial import ConvexHull
     hull = ConvexHull(points_kept)
     hull_points = points_kept[hull.vertices]
     return hull_points
@@ -228,39 +230,45 @@ def handle_chat(chat_history, user_message):
             chat_history = chat_history + [{"role": "assistant", "content": "CSV must be uploaded with 'latitude' and 'longitude' columns."}]
             return chat_history, gr.update()
 
-        # For now, only support all points (not per-animal)
-        hull_points = mcp_polygon(df['latitude'].values, df['longitude'].values, percent)
-        if hull_points is None:
-            chat_history = chat_history + [{"role": "user", "content": user_message}]
-            chat_history = chat_history + [{"role": "assistant", "content": "Not enough points for MCP."}]
-            return chat_history, gr.update()
+        if "animal_id" not in df.columns:
+            df["animal_id"] = "sample"
 
         m = folium.Map(location=[df['latitude'].mean(), df['longitude'].mean()], zoom_start=6)
         folium.TileLayer("OpenStreetMap").add_to(m)
 
-        # Plot all points
-        for idx, row in df.iterrows():
-            folium.CircleMarker(
-                location=[row['latitude'], row['longitude']],
-                radius=3,
-                color="#3388ff",
-                fill=True,
-                fill_opacity=0.7
-            ).add_to(m)
+        # Plot all points, colored by animal_id
+        animal_ids = df["animal_id"].unique()
+        color_map = {aid: f"#{random.randint(0, 0xFFFFFF):06x}" for aid in animal_ids}
 
-        # Plot MCP polygon
-        folium.Polygon(
-            locations=[(lat, lon) for lon, lat in hull_points],
-            color='red',
-            fill=True,
-            fill_opacity=0.2,
-            popup=f"MCP {percent}%"
-        ).add_to(m)
+        for animal in animal_ids:
+            track = df[df["animal_id"] == animal]
+            color = color_map[animal]
+
+            # Plot points
+            for idx, row in track.iterrows():
+                folium.CircleMarker(
+                    location=[row['latitude'], row['longitude']],
+                    radius=3,
+                    color=color,
+                    fill=True,
+                    fill_opacity=0.7
+                ).add_to(m)
+
+            # MCP per animal
+            hull_points = mcp_polygon(track['latitude'].values, track['longitude'].values, percent)
+            if hull_points is not None:
+                folium.Polygon(
+                    locations=[(lat, lon) for lon, lat in hull_points],
+                    color=color,
+                    fill=True,
+                    fill_opacity=0.2,
+                    popup=f"{animal} MCP {percent}%"
+                ).add_to(m)
 
         folium.LayerControl(collapsed=False).add_to(m)
         map_html = m._repr_html_()
         chat_history = chat_history + [{"role": "user", "content": user_message}]
-        chat_history = chat_history + [{"role": "assistant", "content": f"MCP {percent}% home range calculated and displayed on the map."}]
+        chat_history = chat_history + [{"role": "assistant", "content": f"MCP {percent}% home ranges calculated for each animal and displayed on the map."}]
         return chat_history, gr.update(value=map_html)
     else:
         chat_history = chat_history + [{"role": "user", "content": user_message}]
