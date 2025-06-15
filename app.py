@@ -11,9 +11,15 @@ from pyproj import CRS, Transformer
 from together import Together
 from dotenv import load_dotenv
 from scipy.spatial import ConvexHull
-from shapely.geometry import Polygon, mapping, Point
+from shapely.geometry import Polygon
+import geopandas as gpd
+import numpy as np
 
 print("Starting SpatChat (Python-only MCP)")
+
+# ====== GLOBAL MCP STORAGE ======
+mcp_results = {}  # animal_id -> {"polygon": Polygon, "area": area_km2}
+mcp_percent = 95  # Store last-used percent for reporting and export
 
 # ========== LLM SETUP (Together API) ==========
 
@@ -199,8 +205,6 @@ def mcp_polygon(latitudes, longitudes, percent=95):
     Compute the MCP polygon for the top `percent` of points by distance from centroid.
     Returns array of (lon, lat) points forming the MCP (or None if <3 points).
     """
-    import numpy as np
-
     points = np.column_stack((longitudes, latitudes))
     if len(points) < 3:
         return None
@@ -214,16 +218,29 @@ def mcp_polygon(latitudes, longitudes, percent=95):
     if len(points_kept) < 3:
         return None  # Cannot form a polygon
 
-    from scipy.spatial import ConvexHull
     hull = ConvexHull(points_kept)
     hull_points = points_kept[hull.vertices]
     return hull_points
 
 def handle_chat(chat_history, user_message):
-    global cached_df
+    global cached_df, mcp_results, mcp_percent
+
+    # === Respond to "what are the mcp area" (case-insensitive) ===
+    if "mcp area" in user_message.lower():
+        if not mcp_results:
+            response = "No MCPs have been calculated yet."
+        else:
+            header = "| Animal ID | MCP Area (km²) |\n|---|---|"
+            rows = "\n".join(f"| {aid} | {v['area']:.2f} |" for aid, v in mcp_results.items())
+            response = f"### MCP Areas ({mcp_percent}% MCP)\n{header}\n{rows}"
+        chat_history = chat_history + [{"role": "user", "content": user_message}]
+        chat_history = chat_history + [{"role": "assistant", "content": response}]
+        return chat_history, gr.update()
+
     tool, llm_output = ask_llm(chat_history, user_message)
     if tool and tool.get("tool") == "home_range" and tool.get("method") == "mcp":
         percent = tool.get("level", 95)
+        mcp_percent = percent  # store last-used percent
         df = cached_df
         if df is None or "latitude" not in df or "longitude" not in df:
             chat_history = chat_history + [{"role": "user", "content": user_message}]
@@ -232,6 +249,8 @@ def handle_chat(chat_history, user_message):
 
         if "animal_id" not in df.columns:
             df["animal_id"] = "sample"
+
+        mcp_results.clear()  # Clear old results
 
         m = folium.Map(location=[df['latitude'].mean(), df['longitude'].mean()], zoom_start=10)
         folium.TileLayer("OpenStreetMap").add_to(m)
@@ -253,6 +272,9 @@ def handle_chat(chat_history, user_message):
         animal_ids = df["animal_id"].unique()
         color_map = {aid: f"#{random.randint(0, 0xFFFFFF):06x}" for aid in animal_ids}
 
+        # Set up projection for area: EPSG:3857 (meters)
+        transformer = Transformer.from_crs("epsg:4326", "epsg:3857", always_xy=True)
+
         for animal in animal_ids:
             track = df[df["animal_id"] == animal]
             color = color_map[animal]
@@ -271,6 +293,13 @@ def handle_chat(chat_history, user_message):
             # MCP for each animal
             hull_points = mcp_polygon(track['latitude'].values, track['longitude'].values, percent)
             if hull_points is not None:
+                # Folium: (lat, lon); Shapely: (lon, lat)
+                # Store polygon and area for download/stats
+                coords_lonlat = [(lon, lat) for lon, lat in hull_points]
+                coords_proj = [transformer.transform(lon, lat) for lon, lat in coords_lonlat]
+                poly = Polygon(coords_proj)
+                area_km2 = poly.area / 1e6
+                mcp_results[animal] = {"polygon": Polygon(coords_lonlat), "area": area_km2}
                 folium.Polygon(
                     locations=[(lat, lon) for lon, lat in hull_points],
                     color=color,
@@ -284,12 +313,33 @@ def handle_chat(chat_history, user_message):
         folium.LayerControl(collapsed=False).add_to(m)
         map_html = m._repr_html_()
         chat_history = chat_history + [{"role": "user", "content": user_message}]
-        chat_history = chat_history + [{"role": "assistant", "content": f"MCP {percent}% home ranges calculated for each animal and displayed on the map."}]
+        chat_history = chat_history + [{"role": "assistant", "content": f"MCP {percent}% home ranges calculated for each animal and displayed on the map. Click 'Download MCPs' below the map to export GeoJSON."}]
         return chat_history, gr.update(value=map_html)
     else:
         chat_history = chat_history + [{"role": "user", "content": user_message}]
         chat_history = chat_history + [{"role": "assistant", "content": llm_output.strip()}]
         return chat_history, gr.update()
+
+def download_mcp_geojson():
+    if not mcp_results:
+        return None
+    # Save as GeoJSON
+    features = []
+    for animal_id, v in mcp_results.items():
+        features.append({
+            "type": "Feature",
+            "properties": {"animal_id": animal_id, "area_km2": v["area"]},
+            "geometry": mapping(v["polygon"])
+        })
+    geojson = {
+        "type": "FeatureCollection",
+        "features": features
+    }
+    os.makedirs("outputs", exist_ok=True)
+    outpath = os.path.join("outputs", "mcps.geojson")
+    with open(outpath, "w") as f:
+        json.dump(geojson, f)
+    return outpath
 
 with gr.Blocks() as demo:
     gr.Markdown("## SpatChat: Home Range - Movement Preview")
@@ -309,6 +359,7 @@ with gr.Blocks() as demo:
             confirm_btn = gr.Button("Confirm Coordinate Settings", visible=False)
         with gr.Column(scale=3):
             map_output = gr.HTML(label="Map Preview", value=render_empty_map(), show_label=False)
+            download_btn = gr.Button("Download MCPs (GeoJSON)")
 
     file_input.change(
         fn=handle_upload_initial,
@@ -328,5 +379,5 @@ with gr.Blocks() as demo:
         inputs=[chatbot, user_input],
         outputs=[chatbot, map_output]
     )
-
-demo.launch()
+    download_btn.click(
+        fn=download_mcp_geojson
