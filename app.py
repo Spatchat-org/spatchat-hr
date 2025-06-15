@@ -6,7 +6,6 @@ import pandas as pd
 import folium
 import shutil
 import random
-import glob
 from pyproj import CRS, Transformer
 from together import Together
 from dotenv import load_dotenv
@@ -66,6 +65,7 @@ def ask_llm(chat_history, user_input):
 
 cached_df = None
 cached_headers = []
+last_map_html = None  # To keep the last map visible
 
 def parse_crs_input(crs_input):
     crs_input = str(crs_input).strip().upper()
@@ -95,8 +95,17 @@ def render_empty_map():
     folium.LayerControl(collapsed=False).add_to(m)
     return m._repr_html_()
 
+def fit_map_to_points(m, latitudes, longitudes):
+    """Zoom to fit all points, unless empty."""
+    try:
+        if len(latitudes) >= 1 and len(longitudes) >= 1:
+            bounds = [[min(latitudes), min(longitudes)], [max(latitudes), max(longitudes)]]
+            m.fit_bounds(bounds)
+    except Exception as e:
+        pass  # Fallback to default zoom
+
 def handle_upload_initial(file):
-    global cached_df, cached_headers
+    global cached_df, cached_headers, last_map_html
     os.makedirs("uploads", exist_ok=True)
     filename = os.path.join("uploads", os.path.basename(file))
     shutil.copy(file, filename)
@@ -106,30 +115,34 @@ def handle_upload_initial(file):
         cached_df = df
         cached_headers = list(df.columns)
     except Exception as e:
-        return [], gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), render_empty_map(), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False)
+        last_map_html = render_empty_map()
+        return [], gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), last_map_html, gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False)
 
     lower_cols = [col.lower() for col in df.columns]
     if "latitude" in lower_cols and "longitude" in lower_cols:
+        last_map_html = handle_upload_confirm("longitude", "latitude", "")
         return [
             {"role": "assistant", "content": "CSV uploaded successfully. Latitude and longitude detected. You may now proceed to create home ranges."}
-        ], gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), handle_upload_confirm("longitude", "latitude", ""), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False)
+        ], gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), last_map_html, gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False)
 
     preferred_x = next((col for col in df.columns if col.lower() in ["x", "easting"]), df.columns[0])
     preferred_y = next((col for col in df.columns if col.lower() in ["y", "northing"]), df.columns[1] if len(df.columns) > 1 else df.columns[0])
 
+    last_map_html = render_empty_map()
     return [
         {"role": "assistant", "content": "CSV uploaded. Coordinate columns not clearly labeled. Please confirm X/Y columns and provide a CRS if needed. Be sure to click the Confirm button after filling these fields."}
     ], \
     gr.update(choices=cached_headers, value=preferred_x, visible=True), \
     gr.update(choices=cached_headers, value=preferred_y, visible=True), \
     gr.update(visible=True), \
-    render_empty_map(), \
+    last_map_html, \
     gr.update(visible=True), gr.update(visible=True), gr.update(visible=True), gr.update(visible=True)
 
 def handle_upload_confirm(x_col, y_col, crs_input):
-    global cached_df
+    global cached_df, last_map_html
     df = cached_df.copy()
     if x_col not in df.columns or y_col not in df.columns:
+        last_map_html = render_empty_map()
         return "<p>Selected coordinate columns not found in data.</p>"
 
     if x_col.lower() in ["longitude", "lon"] and y_col.lower() in ["latitude", "lat"]:
@@ -141,6 +154,7 @@ def handle_upload_confirm(x_col, y_col, crs_input):
             transformer = Transformer.from_crs(CRS.from_epsg(epsg), CRS.from_epsg(4326), always_xy=True)
             df['longitude'], df['latitude'] = transformer.transform(df[x_col].values, df[y_col].values)
         except Exception as e:
+            last_map_html = render_empty_map()
             return f"<p>Failed to convert coordinates: {e}</p>"
 
     has_timestamp = "timestamp" in df.columns
@@ -150,12 +164,8 @@ def handle_upload_confirm(x_col, y_col, crs_input):
     if not has_animal_id:
         df["animal_id"] = "sample"
 
-    # Fit map bounds to all points
-    lat_min, lat_max = df['latitude'].min(), df['latitude'].max()
-    lon_min, lon_max = df['longitude'].min(), df['longitude'].max()
-    center = [(lat_min + lat_max) / 2, (lon_min + lon_max) / 2]
-    m = folium.Map(location=center, zoom_start=2, control_scale=True)
-
+    center = [df["latitude"].mean(), df["longitude"].mean()]
+    m = folium.Map(location=center, zoom_start=9, control_scale=True)
     folium.TileLayer("OpenStreetMap").add_to(m)
     folium.TileLayer("CartoDB positron", attr='CartoDB').add_to(m)
     folium.TileLayer(
@@ -198,32 +208,38 @@ def handle_upload_confirm(x_col, y_col, crs_input):
     points_layer.add_to(m)
     if has_timestamp:
         lines_layer.add_to(m)
+    fit_map_to_points(m, df['latitude'].values, df['longitude'].values)
     folium.LayerControl(collapsed=False).add_to(m)
-    # Fit bounds to data for best zoom
-    m.fit_bounds([[lat_min, lon_min], [lat_max, lon_max]])
-
-    return m._repr_html_()
+    last_map_html = m._repr_html_()
+    return last_map_html
 
 def mcp_polygon(latitudes, longitudes, percent=95):
+    """
+    Compute the MCP polygon for the top `percent` of points by distance from centroid.
+    Returns array of (lon, lat) points forming the MCP (or None if <3 points).
+    """
     points = np.column_stack((longitudes, latitudes))
     if len(points) < 3:
         return None
+
     centroid = points.mean(axis=0)
     dists = np.linalg.norm(points - centroid, axis=1)
     n_keep = max(3, int(len(points) * (percent / 100.0)))
     keep_idx = np.argsort(dists)[:n_keep]
     points_kept = points[keep_idx]
+
     if len(points_kept) < 3:
         return None  # Cannot form a polygon
+
     hull = ConvexHull(points_kept)
     hull_points = points_kept[hull.vertices]
     return hull_points
 
 def handle_chat(chat_history, user_message):
-    global cached_df, mcp_results, mcp_percent
+    global cached_df, mcp_results, mcp_percent, last_map_html
 
-    # Respond to "mcp area" or "what is the area"
-    if ("mcp area" in user_message.lower()) or (re.search(r"\barea\b", user_message.lower())):
+    # === Respond to "what are the mcp area" (case-insensitive) ===
+    if "mcp area" in user_message.lower() or "what is the area" in user_message.lower():
         if not mcp_results:
             response = "No MCPs have been calculated yet."
         else:
@@ -232,7 +248,8 @@ def handle_chat(chat_history, user_message):
             response = f"### MCP Areas ({mcp_percent}% MCP)\n{header}\n{rows}"
         chat_history = chat_history + [{"role": "user", "content": user_message}]
         chat_history = chat_history + [{"role": "assistant", "content": response}]
-        return chat_history, gr.update(value="")  # Clear input
+        # Always return current map so it doesn't disappear
+        return chat_history, gr.update(value=last_map_html)
 
     tool, llm_output = ask_llm(chat_history, user_message)
     if tool and tool.get("tool") == "home_range" and tool.get("method") == "mcp":
@@ -242,18 +259,18 @@ def handle_chat(chat_history, user_message):
         if df is None or "latitude" not in df or "longitude" not in df:
             chat_history = chat_history + [{"role": "user", "content": user_message}]
             chat_history = chat_history + [{"role": "assistant", "content": "CSV must be uploaded with 'latitude' and 'longitude' columns."}]
-            return chat_history, gr.update(value="")
+            return chat_history, gr.update(value=last_map_html)
 
         if "animal_id" not in df.columns:
             df["animal_id"] = "sample"
 
         mcp_results.clear()  # Clear old results
 
-        # Fit bounds to all points for zoom
-        lat_min, lat_max = df['latitude'].min(), df['latitude'].max()
-        lon_min, lon_max = df['longitude'].min(), df['longitude'].max()
-        center = [(lat_min + lat_max) / 2, (lon_min + lon_max) / 2]
-        m = folium.Map(location=center, zoom_start=2, control_scale=True)
+        # Prepare map
+        all_lats = []
+        all_lons = []
+
+        m = folium.Map(location=[df['latitude'].mean(), df['longitude'].mean()], zoom_start=10)
         folium.TileLayer("OpenStreetMap").add_to(m)
         folium.TileLayer("CartoDB positron", attr='CartoDB').add_to(m)
         folium.TileLayer(
@@ -268,20 +285,21 @@ def handle_chat(chat_history, user_message):
         ).add_to(m)
 
         points_layer = folium.FeatureGroup(name="Points", show=True)
-        lines_layer = folium.FeatureGroup(name="Tracks", show=True)
+        paths_layer = folium.FeatureGroup(name="Tracks", show=True)
         mcps_layer = folium.FeatureGroup(name="MCP Polygons", show=True)
 
         animal_ids = df["animal_id"].unique()
         color_map = {aid: f"#{random.randint(0, 0xFFFFFF):06x}" for aid in animal_ids}
 
-        # Set up projection for area: EPSG:3857 (meters)
         transformer = Transformer.from_crs("epsg:4326", "epsg:3857", always_xy=True)
 
         for animal in animal_ids:
             track = df[df["animal_id"] == animal]
             color = color_map[animal]
+            all_lats.extend(track['latitude'].values)
+            all_lons.extend(track['longitude'].values)
 
-            # Points for each animal
+            # Points
             for idx, row in track.iterrows():
                 folium.CircleMarker(
                     location=[row['latitude'], row['longitude']],
@@ -291,14 +309,14 @@ def handle_chat(chat_history, user_message):
                     fill_opacity=0.7,
                     popup=f"{animal}"
                 ).add_to(points_layer)
+            # Path
+            if len(track) > 1:
+                folium.PolyLine(
+                    list(zip(track['latitude'], track['longitude'])),
+                    color=color, weight=2.5, opacity=0.8, popup=animal
+                ).add_to(paths_layer)
 
-            # Track for each animal (show lines if timestamp exists)
-            if "timestamp" in track.columns:
-                track = track.sort_values("timestamp")
-                coords = list(zip(track["latitude"], track["longitude"]))
-                folium.PolyLine(coords, color=color, weight=2.5, opacity=0.8, popup=animal).add_to(lines_layer)
-
-            # MCP for each animal
+            # MCP
             hull_points = mcp_polygon(track['latitude'].values, track['longitude'].values, percent)
             if hull_points is not None:
                 coords_lonlat = [(lon, lat) for lon, lat in hull_points]
@@ -315,23 +333,25 @@ def handle_chat(chat_history, user_message):
                 ).add_to(mcps_layer)
 
         points_layer.add_to(m)
-        lines_layer.add_to(m)
+        paths_layer.add_to(m)
         mcps_layer.add_to(m)
+        fit_map_to_points(m, all_lats, all_lons)
         folium.LayerControl(collapsed=False).add_to(m)
-        # Fit bounds for all points
-        m.fit_bounds([[lat_min, lon_min], [lat_max, lon_max]])
         map_html = m._repr_html_()
+        last_map_html = map_html
         chat_history = chat_history + [{"role": "user", "content": user_message}]
         chat_history = chat_history + [{"role": "assistant", "content": f"MCP {percent}% home ranges calculated for each animal and displayed on the map. Click 'Download Results' below the map to export GeoJSON and CSV."}]
-        return chat_history, gr.update(value="")
+        # Clear user input after submit
+        return chat_history, gr.update(value=map_html), ""
     else:
         chat_history = chat_history + [{"role": "user", "content": user_message}]
         chat_history = chat_history + [{"role": "assistant", "content": llm_output.strip()}]
-        return chat_history, gr.update(value="")
+        # Clear user input after submit, always return map
+        return chat_history, gr.update(value=last_map_html), ""
 
-def download_mcp_files():
+def download_mcp_results():
     if not mcp_results:
-        return None
+        return None, None
 
     # GeoJSON
     features = []
@@ -352,10 +372,13 @@ def download_mcp_files():
 
     # CSV
     csv_path = os.path.join("outputs", "mcp_areas.csv")
-    area_data = [{"animal_id": animal_id, "mcp_area_km2": v["area"]} for animal_id, v in mcp_results.items()]
-    pd.DataFrame(area_data).to_csv(csv_path, index=False)
+    df = pd.DataFrame(
+        [(aid, v["area"]) for aid, v in mcp_results.items()],
+        columns=["animal_id", "area_km2"]
+    )
+    df.to_csv(csv_path, index=False)
 
-    return [geojson_path, csv_path]
+    return geojson_path, csv_path
 
 with gr.Blocks() as demo:
     gr.Markdown("## SpatChat: Home Range - Movement Preview")
@@ -367,7 +390,7 @@ with gr.Blocks() as demo:
                 type="messages",
                 value=[{"role": "assistant", "content": "Welcome to SpatChat! Please upload a CSV containing coordinates (lat/lon or UTM) and optional timestamp/animal_id to begin."}]
             )
-            user_input = gr.Textbox(label=None, placeholder="Ask SpatChat...", lines=1)
+            user_input = gr.Textbox(label=None, placeholder="Ask SpatChat...", lines=1, elem_id="user_input")
             file_input = gr.File(label="Upload Movement CSV")
             x_col = gr.Dropdown(label="X column", choices=[], visible=False)
             y_col = gr.Dropdown(label="Y column", choices=[], visible=False)
@@ -375,7 +398,7 @@ with gr.Blocks() as demo:
             confirm_btn = gr.Button("Confirm Coordinate Settings", visible=False)
         with gr.Column(scale=3):
             map_output = gr.HTML(label="Map Preview", value=render_empty_map(), show_label=False)
-            download_btn = gr.Button("Download Results (GeoJSON + CSV)")
+            download_btn = gr.DownloadButton("Download Results (GeoJSON and CSV)", file_count="multiple")
 
     file_input.change(
         fn=handle_upload_initial,
@@ -390,21 +413,15 @@ with gr.Blocks() as demo:
         inputs=[x_col, y_col, crs_input],
         outputs=map_output
     )
-
-    # Submit and clear user input on enter
-    def submit_and_clear(chat_history, user_input):
-        chat_out, map_html = handle_chat(chat_history, user_input)
-        return chat_out, map_html, gr.update(value="")  # clear input
-
     user_input.submit(
-        fn=submit_and_clear,
+        fn=handle_chat,
         inputs=[chatbot, user_input],
         outputs=[chatbot, map_output, user_input]
     )
-
     download_btn.click(
-        fn=download_mcp_files,
-        outputs=gr.Files()
+        fn=download_mcp_results,
+        inputs=[],
+        outputs=[gr.File(label="GeoJSON"), gr.File(label="CSV")]
     )
 
 demo.launch()
