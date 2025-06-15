@@ -1,9 +1,3 @@
-r-base
-r-base-dev
-libgdal-dev
-libgeos-dev
-libproj-dev
-libudunits2-dev
 git
 git-lfs
 ffmpeg
@@ -13,3 +7,12 @@ cmake
 rsync
 libgl1-mesa-glx
 curl
+libgdal-dev
+libgeos-dev
+libproj-dev
+libudunits2-dev
+r-base
+r-cran-sf
+r-cran-move
+r-cran-dplyr
+r-cran-data.table
