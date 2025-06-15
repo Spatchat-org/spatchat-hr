@@ -152,7 +152,7 @@ def handle_upload_confirm(x_col, y_col, crs_input):
         df["animal_id"] = "sample"
 
     center = [df["latitude"].mean(), df["longitude"].mean()]
-    m = folium.Map(location=center, zoom_start=8, control_scale=True)
+    m = folium.Map(location=center, zoom_start=9, control_scale=True)
 
     folium.TileLayer("OpenStreetMap").add_to(m)
     folium.TileLayer("CartoDB positron", attr='CartoDB').add_to(m)
