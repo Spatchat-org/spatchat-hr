@@ -23,7 +23,8 @@ RUN apt-get update && \
 RUN if [ ! -f /usr/bin/Rscript ]; then ln -s /usr/lib/R/bin/Rscript /usr/bin/Rscript; fi
 RUN which Rscript && Rscript --version
 
-RUN Rscript -e "install.packages(c('sf','move','dplyr','data.table','adehabitatHR','raster'), dependencies=TRUE, repos='https://cloud.r-project.org')"
+# Install just sf for now
+RUN Rscript -e "install.packages('sf', dependencies=TRUE, repos='https://cloud.r-project.org')"
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
