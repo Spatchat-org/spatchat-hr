@@ -380,4 +380,8 @@ with gr.Blocks() as demo:
         outputs=[chatbot, map_output]
     )
     download_btn.click(
-        fn=download_mcp_geojson
+        fn=download_mcp_geojson,
+        outputs=gr.File()
+    )
+
+demo.launch()
