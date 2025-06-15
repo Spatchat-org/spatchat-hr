@@ -1,3 +1,21 @@
+import subprocess
+import os
+
+def r_package_installed(pkg):
+    try:
+        subprocess.run(
+            ['Rscript', '-e', f"stopifnot(requireNamespace('{pkg}', quietly=TRUE))"],
+            check=True,
+            capture_output=True
+        )
+        return True
+    except Exception:
+        return False
+
+if not r_package_installed('adehabitatHR'):
+    print("Running install.R to install missing R packages...")
+    subprocess.run(["Rscript", "install.R"], check=True)
+
 import os
 import re
 import json
@@ -14,6 +32,7 @@ from dotenv import load_dotenv
 
 import shutil
 print("Rscript path at startup:", shutil.which("Rscript"))
+
 
 # ========== LLM SETUP (Together API) ==========
 
