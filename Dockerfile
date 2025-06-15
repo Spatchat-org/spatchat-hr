@@ -5,10 +5,6 @@ RUN apt-get update && \
     r-base \
     r-base-core \
     r-base-dev \
-    r-cran-sf \
-    r-cran-move \
-    r-cran-dplyr \
-    r-cran-data.table \
     libgdal-dev \
     libgeos-dev \
     libproj-dev \
@@ -24,12 +20,10 @@ RUN apt-get update && \
     curl \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Manually link Rscript if missing (robust fix)
 RUN if [ ! -f /usr/bin/Rscript ]; then ln -s /usr/lib/R/bin/Rscript /usr/bin/Rscript; fi
-
 RUN which Rscript && Rscript --version
 
-RUN Rscript -e "install.packages(c('adehabitatHR','move','sf','raster','dplyr'), dependencies=TRUE, repos='https://cloud.r-project.org')"
+RUN Rscript -e "install.packages(c('sf','move','dplyr','data.table','adehabitatHR','raster'), dependencies=TRUE, repos='https://cloud.r-project.org')"
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
