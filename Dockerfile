@@ -1,10 +1,9 @@
-# Use official lightweight Python base image
 FROM python:3.10-slim
 
-# Install system dependencies and R
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     r-base \
+    r-base-core \
     r-base-dev \
     r-cran-sf \
     r-cran-move \
@@ -25,18 +24,18 @@ RUN apt-get update && \
     curl \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Install R CRAN packages that are NOT in apt (add more as needed)
+# Manually link Rscript if missing (robust fix)
+RUN if [ ! -f /usr/bin/Rscript ]; then ln -s /usr/lib/R/bin/Rscript /usr/bin/Rscript; fi
+
+RUN which Rscript && Rscript --version
+
 RUN Rscript -e "install.packages(c('adehabitatHR','move','sf','raster','dplyr'), dependencies=TRUE, repos='https://cloud.r-project.org')"
 
-# Install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy your application code (everything)
 COPY . .
 
-# Expose port (usually 7860 for Gradio, but not strictly needed)
 EXPOSE 7860
 
-# Start your Gradio app
 CMD ["python", "app.py"]
