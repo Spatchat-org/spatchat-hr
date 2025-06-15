@@ -152,7 +152,7 @@ def handle_upload_confirm(x_col, y_col, crs_input):
         df["animal_id"] = "sample"
 
     center = [df["latitude"].mean(), df["longitude"].mean()]
-    m = folium.Map(location=center, zoom_start=10, control_scale=True)
+    m = folium.Map(location=center, zoom_start=8, control_scale=True)
 
     folium.TileLayer("OpenStreetMap").add_to(m)
     folium.TileLayer("CartoDB positron", attr='CartoDB').add_to(m)
@@ -313,7 +313,7 @@ def handle_chat(chat_history, user_message):
         folium.LayerControl(collapsed=False).add_to(m)
         map_html = m._repr_html_()
         chat_history = chat_history + [{"role": "user", "content": user_message}]
-        chat_history = chat_history + [{"role": "assistant", "content": f"MCP {percent}% home ranges calculated for each animal and displayed on the map. Click 'Download MCPs' below the map to export GeoJSON."}]
+        chat_history = chat_history + [{"role": "assistant", "content": f"MCP {percent}% home ranges calculated for each animal and displayed on the map. Click 'Download Results' below the map to export GeoJSON."}]
         return chat_history, gr.update(value=map_html)
     else:
         chat_history = chat_history + [{"role": "user", "content": user_message}]
@@ -359,7 +359,7 @@ with gr.Blocks() as demo:
             confirm_btn = gr.Button("Confirm Coordinate Settings", visible=False)
         with gr.Column(scale=3):
             map_output = gr.HTML(label="Map Preview", value=render_empty_map(), show_label=False)
-            download_btn = gr.Button("Download MCPs (GeoJSON)")
+            download_btn = gr.Button("Download Results (GeoJSON)")
 
     file_input.change(
         fn=handle_upload_initial,
