@@ -3,7 +3,7 @@ title: Spatchat Hr
 emoji: 🏢
 colorFrom: yellow
 colorTo: red
-sdk: gradio
+sdk: docker
 sdk_version: 5.29.0
 app_file: app.py
 pinned: false
