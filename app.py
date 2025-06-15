@@ -1,6 +1,10 @@
 import subprocess
 import os
 
+print("PATH:", os.environ.get("PATH"))
+print("Files in /usr/bin:", os.listdir("/usr/bin"))
+
+
 def r_package_installed(pkg):
     try:
         subprocess.run(
