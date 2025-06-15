@@ -1,0 +1,15 @@
+r-base
+r-base-dev
+libgdal-dev
+libgeos-dev
+libproj-dev
+libudunits2-dev
+git
+git-lfs
+ffmpeg
+libsm6
+libxext6
+cmake
+rsync
+libgl1-mesa-glx
+curl
