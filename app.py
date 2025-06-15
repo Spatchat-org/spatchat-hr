@@ -267,6 +267,7 @@ def handle_chat(chat_history, user_message):
         ).add_to(m)
 
         points_layer = folium.FeatureGroup(name="Points", show=True)
+        lines_layer = folium.FeatureGroup(name="Tracks", show=True)
         mcps_layer = folium.FeatureGroup(name="MCP Polygons", show=True)
 
         animal_ids = df["animal_id"].unique()
@@ -278,6 +279,13 @@ def handle_chat(chat_history, user_message):
         for animal in animal_ids:
             track = df[df["animal_id"] == animal]
             color = color_map[animal]
+
+            # Draw tracks (lines)
+            if "timestamp" in track.columns:
+                track = track.sort_values("timestamp")
+            coords = list(zip(track["latitude"], track["longitude"]))
+            if len(coords) > 1:
+                folium.PolyLine(coords, color=color, weight=2.5, opacity=0.8, popup=animal).add_to(lines_layer)
 
             # Points for each animal
             for idx, row in track.iterrows():
@@ -293,8 +301,6 @@ def handle_chat(chat_history, user_message):
             # MCP for each animal
             hull_points = mcp_polygon(track['latitude'].values, track['longitude'].values, percent)
             if hull_points is not None:
-                # Folium: (lat, lon); Shapely: (lon, lat)
-                # Store polygon and area for download/stats
                 coords_lonlat = [(lon, lat) for lon, lat in hull_points]
                 coords_proj = [transformer.transform(lon, lat) for lon, lat in coords_lonlat]
                 poly = Polygon(coords_proj)
@@ -309,6 +315,7 @@ def handle_chat(chat_history, user_message):
                 ).add_to(mcps_layer)
 
         points_layer.add_to(m)
+        lines_layer.add_to(m)   # <----- ADD THIS SO TRACKS ARE IN THE LEGEND
         mcps_layer.add_to(m)
         folium.LayerControl(collapsed=False).add_to(m)
         map_html = m._repr_html_()
