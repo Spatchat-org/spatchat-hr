@@ -6,3 +6,4 @@ together
 python-dotenv
 scipy
 shapely
+geopandas
