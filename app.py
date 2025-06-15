@@ -11,8 +11,7 @@ from pyproj import CRS, Transformer
 from together import Together
 from dotenv import load_dotenv
 from scipy.spatial import ConvexHull
-from shapely.geometry import Polygon
-import geopandas as gpd
+from shapely.geometry import Polygon, mapping
 import numpy as np
 
 print("Starting SpatChat (Python-only MCP)")
@@ -225,8 +224,8 @@ def mcp_polygon(latitudes, longitudes, percent=95):
 def handle_chat(chat_history, user_message):
     global cached_df, mcp_results, mcp_percent
 
-    # === Respond to "what are the mcp area" (case-insensitive) ===
-    if "mcp area" in user_message.lower():
+    # Flexible trigger for area questions
+    if any(key in user_message.lower() for key in ["mcp area", "area", "mcp areas"]):
         if not mcp_results:
             response = "No MCPs have been calculated yet."
         else:
@@ -235,7 +234,7 @@ def handle_chat(chat_history, user_message):
             response = f"### MCP Areas ({mcp_percent}% MCP)\n{header}\n{rows}"
         chat_history = chat_history + [{"role": "user", "content": user_message}]
         chat_history = chat_history + [{"role": "assistant", "content": response}]
-        return chat_history, gr.update()
+        return chat_history, gr.update(), ""  # clear input
 
     tool, llm_output = ask_llm(chat_history, user_message)
     if tool and tool.get("tool") == "home_range" and tool.get("method") == "mcp":
@@ -245,7 +244,7 @@ def handle_chat(chat_history, user_message):
         if df is None or "latitude" not in df or "longitude" not in df:
             chat_history = chat_history + [{"role": "user", "content": user_message}]
             chat_history = chat_history + [{"role": "assistant", "content": "CSV must be uploaded with 'latitude' and 'longitude' columns."}]
-            return chat_history, gr.update()
+            return chat_history, gr.update(), ""
 
         if "animal_id" not in df.columns:
             df["animal_id"] = "sample"
@@ -280,7 +279,7 @@ def handle_chat(chat_history, user_message):
             track = df[df["animal_id"] == animal]
             color = color_map[animal]
 
-            # Draw tracks (lines)
+            # Draw track line
             if "timestamp" in track.columns:
                 track = track.sort_values("timestamp")
             coords = list(zip(track["latitude"], track["longitude"]))
@@ -315,17 +314,17 @@ def handle_chat(chat_history, user_message):
                 ).add_to(mcps_layer)
 
         points_layer.add_to(m)
-        lines_layer.add_to(m)   # <----- ADD THIS SO TRACKS ARE IN THE LEGEND
+        lines_layer.add_to(m)
         mcps_layer.add_to(m)
         folium.LayerControl(collapsed=False).add_to(m)
         map_html = m._repr_html_()
         chat_history = chat_history + [{"role": "user", "content": user_message}]
         chat_history = chat_history + [{"role": "assistant", "content": f"MCP {percent}% home ranges calculated for each animal and displayed on the map. Click 'Download Results' below the map to export GeoJSON."}]
-        return chat_history, gr.update(value=map_html)
+        return chat_history, gr.update(value=map_html), ""
     else:
         chat_history = chat_history + [{"role": "user", "content": user_message}]
         chat_history = chat_history + [{"role": "assistant", "content": llm_output.strip()}]
-        return chat_history, gr.update()
+        return chat_history, gr.update(), ""
 
 def download_mcp_geojson():
     if not mcp_results:
@@ -346,6 +345,7 @@ def download_mcp_geojson():
     outpath = os.path.join("outputs", "mcps.geojson")
     with open(outpath, "w") as f:
         json.dump(geojson, f)
+    print(f"Download path: {outpath} (exists: {os.path.exists(outpath)})")
     return outpath
 
 with gr.Blocks() as demo:
@@ -384,7 +384,7 @@ with gr.Blocks() as demo:
     user_input.submit(
         fn=handle_chat,
         inputs=[chatbot, user_input],
-        outputs=[chatbot, map_output]
+        outputs=[chatbot, map_output, user_input]
     )
     download_btn.click(
         fn=download_mcp_geojson,
