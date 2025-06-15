@@ -150,8 +150,11 @@ def handle_upload_confirm(x_col, y_col, crs_input):
     if not has_animal_id:
         df["animal_id"] = "sample"
 
-    center = [df["latitude"].mean(), df["longitude"].mean()]
-    m = folium.Map(location=center, zoom_start=9, control_scale=True)
+    # Fit map bounds to all points
+    lat_min, lat_max = df['latitude'].min(), df['latitude'].max()
+    lon_min, lon_max = df['longitude'].min(), df['longitude'].max()
+    center = [(lat_min + lat_max) / 2, (lon_min + lon_max) / 2]
+    m = folium.Map(location=center, zoom_start=2, control_scale=True)
 
     folium.TileLayer("OpenStreetMap").add_to(m)
     folium.TileLayer("CartoDB positron", attr='CartoDB').add_to(m)
@@ -196,27 +199,22 @@ def handle_upload_confirm(x_col, y_col, crs_input):
     if has_timestamp:
         lines_layer.add_to(m)
     folium.LayerControl(collapsed=False).add_to(m)
+    # Fit bounds to data for best zoom
+    m.fit_bounds([[lat_min, lon_min], [lat_max, lon_max]])
 
     return m._repr_html_()
 
 def mcp_polygon(latitudes, longitudes, percent=95):
-    """
-    Compute the MCP polygon for the top `percent` of points by distance from centroid.
-    Returns array of (lon, lat) points forming the MCP (or None if <3 points).
-    """
     points = np.column_stack((longitudes, latitudes))
     if len(points) < 3:
         return None
-
     centroid = points.mean(axis=0)
     dists = np.linalg.norm(points - centroid, axis=1)
     n_keep = max(3, int(len(points) * (percent / 100.0)))
     keep_idx = np.argsort(dists)[:n_keep]
     points_kept = points[keep_idx]
-
     if len(points_kept) < 3:
         return None  # Cannot form a polygon
-
     hull = ConvexHull(points_kept)
     hull_points = points_kept[hull.vertices]
     return hull_points
@@ -224,8 +222,8 @@ def mcp_polygon(latitudes, longitudes, percent=95):
 def handle_chat(chat_history, user_message):
     global cached_df, mcp_results, mcp_percent
 
-    # Flexible trigger for area questions
-    if any(key in user_message.lower() for key in ["mcp area", "area", "mcp areas"]):
+    # Respond to "mcp area" or "what is the area"
+    if ("mcp area" in user_message.lower()) or (re.search(r"\barea\b", user_message.lower())):
         if not mcp_results:
             response = "No MCPs have been calculated yet."
         else:
@@ -234,7 +232,7 @@ def handle_chat(chat_history, user_message):
             response = f"### MCP Areas ({mcp_percent}% MCP)\n{header}\n{rows}"
         chat_history = chat_history + [{"role": "user", "content": user_message}]
         chat_history = chat_history + [{"role": "assistant", "content": response}]
-        return chat_history, gr.update(), ""  # clear input
+        return chat_history, gr.update(value="")  # Clear input
 
     tool, llm_output = ask_llm(chat_history, user_message)
     if tool and tool.get("tool") == "home_range" and tool.get("method") == "mcp":
@@ -244,14 +242,18 @@ def handle_chat(chat_history, user_message):
         if df is None or "latitude" not in df or "longitude" not in df:
             chat_history = chat_history + [{"role": "user", "content": user_message}]
             chat_history = chat_history + [{"role": "assistant", "content": "CSV must be uploaded with 'latitude' and 'longitude' columns."}]
-            return chat_history, gr.update(), ""
+            return chat_history, gr.update(value="")
 
         if "animal_id" not in df.columns:
             df["animal_id"] = "sample"
 
         mcp_results.clear()  # Clear old results
 
-        m = folium.Map(location=[df['latitude'].mean(), df['longitude'].mean()], zoom_start=10)
+        # Fit bounds to all points for zoom
+        lat_min, lat_max = df['latitude'].min(), df['latitude'].max()
+        lon_min, lon_max = df['longitude'].min(), df['longitude'].max()
+        center = [(lat_min + lat_max) / 2, (lon_min + lon_max) / 2]
+        m = folium.Map(location=center, zoom_start=2, control_scale=True)
         folium.TileLayer("OpenStreetMap").add_to(m)
         folium.TileLayer("CartoDB positron", attr='CartoDB').add_to(m)
         folium.TileLayer(
@@ -279,13 +281,6 @@ def handle_chat(chat_history, user_message):
             track = df[df["animal_id"] == animal]
             color = color_map[animal]
 
-            # Draw track line
-            if "timestamp" in track.columns:
-                track = track.sort_values("timestamp")
-            coords = list(zip(track["latitude"], track["longitude"]))
-            if len(coords) > 1:
-                folium.PolyLine(coords, color=color, weight=2.5, opacity=0.8, popup=animal).add_to(lines_layer)
-
             # Points for each animal
             for idx, row in track.iterrows():
                 folium.CircleMarker(
@@ -296,6 +291,12 @@ def handle_chat(chat_history, user_message):
                     fill_opacity=0.7,
                     popup=f"{animal}"
                 ).add_to(points_layer)
+
+            # Track for each animal (show lines if timestamp exists)
+            if "timestamp" in track.columns:
+                track = track.sort_values("timestamp")
+                coords = list(zip(track["latitude"], track["longitude"]))
+                folium.PolyLine(coords, color=color, weight=2.5, opacity=0.8, popup=animal).add_to(lines_layer)
 
             # MCP for each animal
             hull_points = mcp_polygon(track['latitude'].values, track['longitude'].values, percent)
@@ -317,19 +318,22 @@ def handle_chat(chat_history, user_message):
         lines_layer.add_to(m)
         mcps_layer.add_to(m)
         folium.LayerControl(collapsed=False).add_to(m)
+        # Fit bounds for all points
+        m.fit_bounds([[lat_min, lon_min], [lat_max, lon_max]])
         map_html = m._repr_html_()
         chat_history = chat_history + [{"role": "user", "content": user_message}]
-        chat_history = chat_history + [{"role": "assistant", "content": f"MCP {percent}% home ranges calculated for each animal and displayed on the map. Click 'Download Results' below the map to export GeoJSON."}]
-        return chat_history, gr.update(value=map_html), ""
+        chat_history = chat_history + [{"role": "assistant", "content": f"MCP {percent}% home ranges calculated for each animal and displayed on the map. Click 'Download Results' below the map to export GeoJSON and CSV."}]
+        return chat_history, gr.update(value="")
     else:
         chat_history = chat_history + [{"role": "user", "content": user_message}]
         chat_history = chat_history + [{"role": "assistant", "content": llm_output.strip()}]
-        return chat_history, gr.update(), ""
+        return chat_history, gr.update(value="")
 
-def download_mcp_geojson():
+def download_mcp_files():
     if not mcp_results:
         return None
-    # Save as GeoJSON
+
+    # GeoJSON
     features = []
     for animal_id, v in mcp_results.items():
         features.append({
@@ -342,11 +346,16 @@ def download_mcp_geojson():
         "features": features
     }
     os.makedirs("outputs", exist_ok=True)
-    outpath = os.path.join("outputs", "mcps.geojson")
-    with open(outpath, "w") as f:
+    geojson_path = os.path.join("outputs", "mcps.geojson")
+    with open(geojson_path, "w") as f:
         json.dump(geojson, f)
-    print(f"Download path: {outpath} (exists: {os.path.exists(outpath)})")
-    return outpath
+
+    # CSV
+    csv_path = os.path.join("outputs", "mcp_areas.csv")
+    area_data = [{"animal_id": animal_id, "mcp_area_km2": v["area"]} for animal_id, v in mcp_results.items()]
+    pd.DataFrame(area_data).to_csv(csv_path, index=False)
+
+    return [geojson_path, csv_path]
 
 with gr.Blocks() as demo:
     gr.Markdown("## SpatChat: Home Range - Movement Preview")
@@ -366,7 +375,7 @@ with gr.Blocks() as demo:
             confirm_btn = gr.Button("Confirm Coordinate Settings", visible=False)
         with gr.Column(scale=3):
             map_output = gr.HTML(label="Map Preview", value=render_empty_map(), show_label=False)
-            download_btn = gr.Button("Download Results (GeoJSON)")
+            download_btn = gr.Button("Download Results (GeoJSON + CSV)")
 
     file_input.change(
         fn=handle_upload_initial,
@@ -381,14 +390,21 @@ with gr.Blocks() as demo:
         inputs=[x_col, y_col, crs_input],
         outputs=map_output
     )
+
+    # Submit and clear user input on enter
+    def submit_and_clear(chat_history, user_input):
+        chat_out, map_html = handle_chat(chat_history, user_input)
+        return chat_out, map_html, gr.update(value="")  # clear input
+
     user_input.submit(
-        fn=handle_chat,
+        fn=submit_and_clear,
         inputs=[chatbot, user_input],
         outputs=[chatbot, map_output, user_input]
     )
+
     download_btn.click(
-        fn=download_mcp_geojson,
-        outputs=gr.File()
+        fn=download_mcp_files,
+        outputs=gr.Files()
     )
 
 demo.launch()
