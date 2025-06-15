@@ -146,7 +146,7 @@ def handle_upload_confirm(x_col, y_col, crs_input):
         df["animal_id"] = "sample"
 
     center = [df["latitude"].mean(), df["longitude"].mean()]
-    m = folium.Map(location=center, zoom_start=6, control_scale=True)
+    m = folium.Map(location=center, zoom_start=10, control_scale=True)
 
     folium.TileLayer("OpenStreetMap").add_to(m)
     folium.TileLayer("CartoDB positron", attr='CartoDB').add_to(m)
@@ -233,10 +233,23 @@ def handle_chat(chat_history, user_message):
         if "animal_id" not in df.columns:
             df["animal_id"] = "sample"
 
-        m = folium.Map(location=[df['latitude'].mean(), df['longitude'].mean()], zoom_start=6)
+        m = folium.Map(location=[df['latitude'].mean(), df['longitude'].mean()], zoom_start=10)
         folium.TileLayer("OpenStreetMap").add_to(m)
+        folium.TileLayer("CartoDB positron", attr='CartoDB').add_to(m)
+        folium.TileLayer(
+            tiles="https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
+            attr="OpenTopoMap",
+            name="Topographic"
+        ).add_to(m)
+        folium.TileLayer(
+            tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+            attr="Esri",
+            name="Satellite"
+        ).add_to(m)
 
-        # Plot all points, colored by animal_id
+        points_layer = folium.FeatureGroup(name="Points", show=True)
+        mcps_layer = folium.FeatureGroup(name="MCP Polygons", show=True)
+
         animal_ids = df["animal_id"].unique()
         color_map = {aid: f"#{random.randint(0, 0xFFFFFF):06x}" for aid in animal_ids}
 
@@ -244,17 +257,18 @@ def handle_chat(chat_history, user_message):
             track = df[df["animal_id"] == animal]
             color = color_map[animal]
 
-            # Plot points
+            # Points for each animal
             for idx, row in track.iterrows():
                 folium.CircleMarker(
                     location=[row['latitude'], row['longitude']],
                     radius=3,
                     color=color,
                     fill=True,
-                    fill_opacity=0.7
-                ).add_to(m)
+                    fill_opacity=0.7,
+                    popup=f"{animal}"
+                ).add_to(points_layer)
 
-            # MCP per animal
+            # MCP for each animal
             hull_points = mcp_polygon(track['latitude'].values, track['longitude'].values, percent)
             if hull_points is not None:
                 folium.Polygon(
@@ -263,8 +277,10 @@ def handle_chat(chat_history, user_message):
                     fill=True,
                     fill_opacity=0.2,
                     popup=f"{animal} MCP {percent}%"
-                ).add_to(m)
+                ).add_to(mcps_layer)
 
+        points_layer.add_to(m)
+        mcps_layer.add_to(m)
         folium.LayerControl(collapsed=False).add_to(m)
         map_html = m._repr_html_()
         chat_history = chat_history + [{"role": "user", "content": user_message}]
