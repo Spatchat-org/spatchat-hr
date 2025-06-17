@@ -320,8 +320,46 @@ def download_mcp_zip():
         zipf.write(csv_path, arcname="mcp_areas.csv")
     return zip_path
 
-with gr.Blocks() as demo:
-    gr.Markdown("## SpatChat: Home Range - Movement Preview")
+with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
+    gr.Image(
+        value="logo_long1.png",
+        show_label=False,
+        show_download_button=False,
+        show_share_button=False,
+        type="filepath",
+        elem_id="logo-img"
+    )
+    gr.HTML("""
+    <style>
+    #logo-img img {
+        height: 90px;
+        margin: 10px 50px 10px 10px;  /* top, right, bottom, left */
+        border-radius: 6px;
+    }
+    </style>
+    """)
+    gr.Markdown("## 🏠 SpatChat: Home Range Analysis {hr}  🦊🦉🐢")
+    gr.HTML("""
+    <div style="margin-top: -10px; margin-bottom: 15px;">
+      <input type="text" value="https://spatchat.org/browse/?room=hr" id="shareLink" readonly style="width: 50%; padding: 5px; background-color: #f8f8f8; color: #222; font-weight: 500; border: 1px solid #ccc; border-radius: 4px;">
+      <button onclick="navigator.clipboard.writeText(document.getElementById('shareLink').value)" style="padding: 5px 10px; background-color: #007BFF; color: white; border: none; border-radius: 4px; cursor: pointer;">
+        📋 Copy Share Link
+      </button>
+      <div style="margin-top: 10px; font-size: 14px;">
+        <b>Share:</b>
+        <a href="https://twitter.com/intent/tweet?text=Checkout+Spatchat!&url=https://spatchat.org/browse/?room=hr" target="_blank">🐦 Twitter</a> |
+        <a href="https://www.facebook.com/sharer/sharer.php?u=https://spatchat.org/browse/?room=hr" target="_blank">📘 Facebook</a>
+      </div>
+    </div>
+    """)
+    gr.Markdown("""
+        <div style="font-size: 14px;">
+        © 2025 Ho Yi Wan & Logan Hysen. All rights reserved.<br>
+        If you use Spatchat in research, please cite:<br>
+        <b>Wan, H.Y.</b> & <b>Hysen, L.</b> (2025). <i>SpatChat: Home Range Analysis.</i>
+        </div>
+    """)
+
     with gr.Row():
         with gr.Column(scale=2):
             chatbot = gr.Chatbot(
@@ -331,8 +369,8 @@ with gr.Blocks() as demo:
                 value=[{"role": "assistant", "content": "Welcome to SpatChat! Please upload a CSV containing coordinates (lat/lon or UTM) and optional timestamp/animal_id to begin."}]
             )
             user_input = gr.Textbox(
-                label=None,
-                placeholder="Ask SpatChat...",
+                label="Ask Spatchat",
+                placeholder="Type commands...",
                 lines=1
             )
             file_input = gr.File(
@@ -345,12 +383,9 @@ with gr.Blocks() as demo:
             confirm_btn = gr.Button("Confirm Coordinate Settings", visible=False)
         with gr.Column(scale=3):
             map_output = gr.HTML(label="Map Preview", value=render_empty_map(), show_label=False)
-            download_btn = gr.DownloadButton(
-                "Download Results (GeoJSON + CSV as ZIP)",
-                download_mcp_zip,          # Must return a .zip path
-                file_types=[".zip"]        # Helps phone browser
-            )
+            download_btn = gr.DownloadButton("📥 Download Results", download_mcp_zip)
 
+    # -- Event wiring (unchanged) --
     file_input.change(
         fn=handle_upload_initial,
         inputs=file_input,
@@ -367,7 +402,12 @@ with gr.Blocks() as demo:
     user_input.submit(
         fn=handle_chat,
         inputs=[chatbot, user_input],
-        outputs=[chatbot, map_output, user_input]  # Last output resets the input box
+        outputs=[chatbot, map_output, user_input]  # Last output resets textbox
+    )
+    download_btn.click(
+        fn=download_mcp_zip,
+        inputs=None,
+        outputs=download_btn
     )
 
 demo.launch()
