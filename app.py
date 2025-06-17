@@ -341,8 +341,8 @@ with gr.Blocks() as demo:
             confirm_btn = gr.Button("Confirm Coordinate Settings", visible=False)
         with gr.Column(scale=3):
             map_output = gr.HTML(label="Map Preview", value=render_empty_map(), show_label=False)
-            download_output = gr.File(label="Download Results (GeoJSON + CSV as ZIP)")
             download_btn = gr.Button("Download Results (GeoJSON + CSV as ZIP)")
+            download_file = gr.File(label="⬇️ Click to download results", visible=False)
 
     file_input.change(
         fn=handle_upload_initial,
@@ -364,7 +364,7 @@ with gr.Blocks() as demo:
     )
     download_btn.click(
         fn=download_mcp_zip,
-        outputs=download_output
+        outputs=download_file
     )
 
 demo.launch()
