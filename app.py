@@ -330,7 +330,11 @@ with gr.Blocks() as demo:
                 type="messages",
                 value=[{"role": "assistant", "content": "Welcome to SpatChat! Please upload a CSV containing coordinates (lat/lon or UTM) and optional timestamp/animal_id to begin."}]
             )
-            user_input = gr.Textbox(label=None, placeholder="Ask SpatChat...", lines=1)
+            user_input = gr.Textbox(
+                label=None,
+                placeholder="Ask SpatChat...",
+                lines=1
+            )
             file_input = gr.File(
                 label="Upload Movement CSV (.csv or .txt only)",
                 file_types=[".csv", ".txt"]
@@ -341,8 +345,11 @@ with gr.Blocks() as demo:
             confirm_btn = gr.Button("Confirm Coordinate Settings", visible=False)
         with gr.Column(scale=3):
             map_output = gr.HTML(label="Map Preview", value=render_empty_map(), show_label=False)
-            download_btn = gr.Button("Download Results (GeoJSON + CSV as ZIP)")
-            download_file = gr.File(label="⬇️ Click to download results", visible=False)
+            download_btn = gr.DownloadButton(
+                "Download Results (GeoJSON + CSV as ZIP)",
+                download_mcp_zip,          # Must return a .zip path
+                file_types=[".zip"]        # Helps phone browser
+            )
 
     file_input.change(
         fn=handle_upload_initial,
@@ -360,11 +367,7 @@ with gr.Blocks() as demo:
     user_input.submit(
         fn=handle_chat,
         inputs=[chatbot, user_input],
-        outputs=[chatbot, map_output, user_input]
-    )
-    download_btn.click(
-        fn=download_mcp_zip,
-        outputs=download_file
+        outputs=[chatbot, map_output, user_input]  # Last output resets the input box
     )
 
 demo.launch()
