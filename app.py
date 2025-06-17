@@ -331,14 +331,18 @@ with gr.Blocks() as demo:
                 value=[{"role": "assistant", "content": "Welcome to SpatChat! Please upload a CSV containing coordinates (lat/lon or UTM) and optional timestamp/animal_id to begin."}]
             )
             user_input = gr.Textbox(label=None, placeholder="Ask SpatChat...", lines=1)
-            file_input = gr.File(label="Upload Movement CSV")
+            file_input = gr.File(
+                label="Upload Movement CSV (.csv or .txt only)",
+                file_types=[".csv", ".txt"]
+            )
             x_col = gr.Dropdown(label="X column", choices=[], visible=False)
             y_col = gr.Dropdown(label="Y column", choices=[], visible=False)
             crs_input = gr.Text(label="CRS (e.g. '32633', '33N', or 'EPSG:32633')", visible=False)
             confirm_btn = gr.Button("Confirm Coordinate Settings", visible=False)
         with gr.Column(scale=3):
             map_output = gr.HTML(label="Map Preview", value=render_empty_map(), show_label=False)
-            download_btn = gr.DownloadButton("Download Results (GeoJSON + CSV as ZIP)", file_name="spatchat_results.zip")
+            download_output = gr.File(label="Download Results (GeoJSON + CSV as ZIP)")
+            download_btn = gr.Button("Download Results (GeoJSON + CSV as ZIP)")
 
     file_input.change(
         fn=handle_upload_initial,
@@ -356,12 +360,11 @@ with gr.Blocks() as demo:
     user_input.submit(
         fn=handle_chat,
         inputs=[chatbot, user_input],
-        outputs=[chatbot, map_output, user_input]  # Last output resets textbox
+        outputs=[chatbot, map_output, user_input]
     )
     download_btn.click(
         fn=download_mcp_zip,
-        inputs=None,
-        outputs=download_btn
+        outputs=download_output
     )
 
 demo.launch()
