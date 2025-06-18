@@ -63,7 +63,6 @@ def ask_llm(chat_history, user_input):
 # ========== App Logic ==========
 cached_df = None
 cached_headers = []
-current_zip_path = None  # Path to most recently generated zip
 
 def render_empty_map():
     m = folium.Map(location=[0, 0], zoom_start=2, control_scale=True)
@@ -231,8 +230,8 @@ def save_results_zip():
         zipf.write(csv_path, arcname="mcp_areas.csv")
     return zip_path
 
-def handle_chat(chat_history, user_message):
-    global cached_df, mcp_results, mcp_percent, current_zip_path
+def handle_chat(chat_history, user_message, download_value):
+    global cached_df, mcp_results, mcp_percent
     # Respond to "area" or "mcp area"
     if "area" in user_message.lower():
         if not mcp_results:
@@ -243,7 +242,7 @@ def handle_chat(chat_history, user_message):
             response = f"### MCP Areas ({mcp_percent}% MCP)\n{header}\n{rows}"
         chat_history = chat_history + [{"role": "user", "content": user_message}]
         chat_history = chat_history + [{"role": "assistant", "content": response}]
-        return chat_history, gr.update(), ""  # Last output resets user_input
+        return chat_history, gr.update(), download_value, ""  # Return download_value unchanged
 
     tool, llm_output = ask_llm(chat_history, user_message)
     if tool and tool.get("tool") == "home_range" and tool.get("method") == "mcp":
@@ -253,7 +252,7 @@ def handle_chat(chat_history, user_message):
         if df is None or "latitude" not in df or "longitude" not in df:
             chat_history = chat_history + [{"role": "user", "content": user_message}]
             chat_history = chat_history + [{"role": "assistant", "content": "CSV must be uploaded with 'latitude' and 'longitude' columns."}]
-            return chat_history, gr.update(), ""
+            return chat_history, gr.update(), download_value, ""
         if "animal_id" not in df.columns:
             df["animal_id"] = "sample"
         mcp_results.clear()
@@ -313,14 +312,14 @@ def handle_chat(chat_history, user_message):
         m = fit_map_to_bounds(m, df)
         map_html = m._repr_html_()
         # After calculation, save ZIP and update DownloadButton value
-        current_zip_path = save_results_zip()
+        zip_path = save_results_zip()
         chat_history = chat_history + [{"role": "user", "content": user_message}]
         chat_history = chat_history + [{"role": "assistant", "content": f"MCP {percent}% home ranges calculated for each animal and displayed on the map. Click 'Download Results' below the map to export GeoJSON + CSV."}]
-        return chat_history, gr.update(value=map_html), current_zip_path
+        return chat_history, gr.update(value=map_html), zip_path, ""
     else:
         chat_history = chat_history + [{"role": "user", "content": user_message}]
         chat_history = chat_history + [{"role": "assistant", "content": llm_output.strip()}]
-        return chat_history, gr.update(), ""
+        return chat_history, gr.update(), download_value, ""
 
 with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     gr.Image(
@@ -335,7 +334,7 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     <style>
     #logo-img img {
         height: 90px;
-        margin: 10px 50px 10px 10px;  /* top, right, bottom, left */
+        margin: 10px 50px 10px 10px;
         border-radius: 6px;
     }
     </style>
@@ -362,6 +361,8 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
         </div>
     """)
 
+    download_value = gr.State(None)
+
     with gr.Row():
         with gr.Column(scale=2):
             chatbot = gr.Chatbot(
@@ -385,7 +386,10 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
             confirm_btn = gr.Button("Confirm Coordinate Settings", visible=False)
         with gr.Column(scale=3):
             map_output = gr.HTML(label="Map Preview", value=render_empty_map(), show_label=False)
-            download_btn = gr.DownloadButton("📥 Download Results", value=None)  # Set value to zip_path after MCP
+            download_btn = gr.DownloadButton(
+                "📥 Download Results",
+                value=lambda: download_value.value
+            )
 
     file_input.change(
         fn=handle_upload_initial,
@@ -402,8 +406,8 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     )
     user_input.submit(
         fn=handle_chat,
-        inputs=[chatbot, user_input],
-        outputs=[chatbot, map_output, user_input]  # <- download_btn.value is set here!
+        inputs=[chatbot, user_input, download_value],
+        outputs=[chatbot, map_output, download_value, user_input]  # Update download_value and clear textbox
     )
 
 demo.launch()
