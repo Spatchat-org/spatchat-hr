@@ -406,11 +406,4 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
         outputs=[chatbot, map_output, download_btn, user_input]  # <- download_btn.value is set here!
     )
 
-    # Ensure text input clears after submit
-    user_input.change(
-        fn=lambda _: "",
-        inputs=user_input,
-        outputs=user_input
-    )
-
 demo.launch()
