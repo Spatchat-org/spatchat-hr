@@ -63,6 +63,7 @@ def ask_llm(chat_history, user_input):
 # ========== App Logic ==========
 cached_df = None
 cached_headers = []
+current_zip_path = None  # Path to most recently generated zip
 
 def render_empty_map():
     m = folium.Map(location=[0, 0], zoom_start=2, control_scale=True)
@@ -199,8 +200,39 @@ def mcp_polygon(latitudes, longitudes, percent=95):
     hull_points = points_kept[hull.vertices]
     return hull_points
 
+def save_results_zip():
+    # Save as GeoJSON
+    features = []
+    for animal_id, v in mcp_results.items():
+        features.append({
+            "type": "Feature",
+            "properties": {"animal_id": animal_id, "area_km2": v["area"]},
+            "geometry": mapping(v["polygon"])
+        })
+    geojson = {
+        "type": "FeatureCollection",
+        "features": features
+    }
+    os.makedirs("outputs", exist_ok=True)
+    geojson_path = os.path.join("outputs", "mcps.geojson")
+    with open(geojson_path, "w") as f:
+        json.dump(geojson, f)
+    # CSV
+    csv_path = os.path.join("outputs", "mcp_areas.csv")
+    df = pd.DataFrame(
+        [(aid, v["area"]) for aid, v in mcp_results.items()],
+        columns=["animal_id", "area_km2"]
+    )
+    df.to_csv(csv_path, index=False)
+    # ZIP
+    zip_path = os.path.join("outputs", "spatchat_results.zip")
+    with zipfile.ZipFile(zip_path, "w") as zipf:
+        zipf.write(geojson_path, arcname="mcps.geojson")
+        zipf.write(csv_path, arcname="mcp_areas.csv")
+    return zip_path
+
 def handle_chat(chat_history, user_message):
-    global cached_df, mcp_results, mcp_percent
+    global cached_df, mcp_results, mcp_percent, current_zip_path
     # Respond to "area" or "mcp area"
     if "area" in user_message.lower():
         if not mcp_results:
@@ -212,6 +244,7 @@ def handle_chat(chat_history, user_message):
         chat_history = chat_history + [{"role": "user", "content": user_message}]
         chat_history = chat_history + [{"role": "assistant", "content": response}]
         return chat_history, gr.update(), ""  # Last output resets user_input
+
     tool, llm_output = ask_llm(chat_history, user_message)
     if tool and tool.get("tool") == "home_range" and tool.get("method") == "mcp":
         percent = tool.get("level", 95)
@@ -279,46 +312,15 @@ def handle_chat(chat_history, user_message):
         folium.LayerControl(collapsed=False).add_to(m)
         m = fit_map_to_bounds(m, df)
         map_html = m._repr_html_()
+        # After calculation, save ZIP and update DownloadButton value
+        current_zip_path = save_results_zip()
         chat_history = chat_history + [{"role": "user", "content": user_message}]
         chat_history = chat_history + [{"role": "assistant", "content": f"MCP {percent}% home ranges calculated for each animal and displayed on the map. Click 'Download Results' below the map to export GeoJSON + CSV."}]
-        return chat_history, gr.update(value=map_html), ""
+        return chat_history, gr.update(value=map_html), current_zip_path
     else:
         chat_history = chat_history + [{"role": "user", "content": user_message}]
         chat_history = chat_history + [{"role": "assistant", "content": llm_output.strip()}]
         return chat_history, gr.update(), ""
-
-def download_mcp_zip():
-    if not mcp_results:
-        return None
-    # Save as GeoJSON
-    features = []
-    for animal_id, v in mcp_results.items():
-        features.append({
-            "type": "Feature",
-            "properties": {"animal_id": animal_id, "area_km2": v["area"]},
-            "geometry": mapping(v["polygon"])
-        })
-    geojson = {
-        "type": "FeatureCollection",
-        "features": features
-    }
-    os.makedirs("outputs", exist_ok=True)
-    geojson_path = os.path.join("outputs", "mcps.geojson")
-    with open(geojson_path, "w") as f:
-        json.dump(geojson, f)
-    # CSV
-    csv_path = os.path.join("outputs", "mcp_areas.csv")
-    df = pd.DataFrame(
-        [(aid, v["area"]) for aid, v in mcp_results.items()],
-        columns=["animal_id", "area_km2"]
-    )
-    df.to_csv(csv_path, index=False)
-    # ZIP
-    zip_path = os.path.join("outputs", "spatchat_results.zip")
-    with zipfile.ZipFile(zip_path, "w") as zipf:
-        zipf.write(geojson_path, arcname="mcps.geojson")
-        zipf.write(csv_path, arcname="mcp_areas.csv")
-    return zip_path
 
 with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     gr.Image(
@@ -383,9 +385,8 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
             confirm_btn = gr.Button("Confirm Coordinate Settings", visible=False)
         with gr.Column(scale=3):
             map_output = gr.HTML(label="Map Preview", value=render_empty_map(), show_label=False)
-            download_btn = gr.DownloadButton("📥 Download Results", download_mcp_zip)
+            download_btn = gr.DownloadButton("📥 Download Results", value=None)  # Set value to zip_path after MCP
 
-    # -- Event wiring (unchanged) --
     file_input.change(
         fn=handle_upload_initial,
         inputs=file_input,
@@ -402,12 +403,14 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     user_input.submit(
         fn=handle_chat,
         inputs=[chatbot, user_input],
-        outputs=[chatbot, map_output, user_input]  # Last output resets textbox
+        outputs=[chatbot, map_output, download_btn, user_input]  # <- download_btn.value is set here!
     )
-    download_btn.click(
-        fn=download_mcp_zip,
-        inputs=None,
-        outputs=download_btn
+
+    # Ensure text input clears after submit
+    user_input.change(
+        fn=lambda _: "",
+        inputs=user_input,
+        outputs=user_input
     )
 
 demo.launch()
