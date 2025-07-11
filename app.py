@@ -14,7 +14,7 @@ from shapely.geometry import Polygon, mapping
 import zipfile
 import re
 
-print("Starting SpatChat (multi-MCP, fixed download version)")
+print("Starting SpatChat (multi-MCP, reliable download version)")
 
 # ====== GLOBAL MCP STORAGE ======
 mcp_results = {}  # animal_id -> {percent: {"polygon": Polygon, "area": area_km2}}
@@ -339,7 +339,9 @@ def handle_chat(chat_history, user_message):
 
     add_mcps(cached_df, percent_list)
     requested_percents.update(percent_list)
-    print("MCP RESULTS:", mcp_results)
+
+    # --- SAVE THE RESULTS ZIP *IMMEDIATELY* ---
+    save_all_mcps_zip()
 
     df = cached_df
     m = folium.Map(location=[df["latitude"].mean(), df["longitude"].mean()], zoom_start=9)
@@ -397,11 +399,6 @@ def handle_chat(chat_history, user_message):
     chat_history = chat_history + [{"role": "user", "content": user_message}]
     chat_history = chat_history + [{"role": "assistant", "content": f"MCP home ranges ({', '.join(str(p) for p in percent_list)}%) calculated and displayed for each animal. Download all results below."}]
     return chat_history, gr.update(value=map_html), ""
-
-def download_results():
-    print("Triggered download_results()")
-    print("Current MCP_RESULTS:", mcp_results)
-    return save_all_mcps_zip()
 
 with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     gr.Image(
@@ -468,7 +465,7 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
             map_output = gr.HTML(label="Map Preview", value=render_empty_map(), show_label=False)
             download_btn = gr.DownloadButton(
                 "📥 Download Results",
-                value=download_results,
+                value="outputs/spatchat_results.zip",  # <--- Path only! No function call!
                 label="Download Results"
             )
 
