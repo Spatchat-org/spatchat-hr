@@ -300,19 +300,17 @@ def save_all_mcps_zip():
     with zipfile.ZipFile(zip_path, "w") as zipf:
         zipf.write(geojson_path, arcname="mcps_all.geojson")
         zipf.write(csv_path, arcname="mcp_areas.csv")
+    print(f"ZIP file saved at {zip_path}. Features in GeoJSON: {len(features)}, Rows in CSV: {len(rows)}")
     return zip_path
 
 def parse_mcp_levels_from_text(text):
-    # Parse all numbers between 1 and 100 from the user message
-    # E.g. "I want 50 and 100 mcps" -> [50, 100]
     levels = [int(val) for val in re.findall(r'\b([1-9][0-9]?|100)\b', text)]
     if not levels:
-        return [95]  # Default
-    # Remove duplicates, sort
+        return [95]
     return sorted(set(levels))
 
 def handle_chat(chat_history, user_message):
-    global cached_df, mcp_results, requested_percents, zip_results
+    global cached_df, mcp_results, requested_percents
     # Respond to "area" or "mcp area"
     if "area" in user_message.lower():
         if not mcp_results:
@@ -330,15 +328,12 @@ def handle_chat(chat_history, user_message):
         return chat_history, gr.update(), ""
 
     tool, llm_output = ask_llm(chat_history, user_message)
-    # Handle home range requests
     if tool and tool.get("tool") == "home_range" and tool.get("method") == "mcp":
         percent_list = tool.get("levels", [95]) if "levels" in tool else [tool.get("level", 95)]
-        # Defensive: ensure percent_list is a list
         if isinstance(percent_list, int):
             percent_list = [percent_list]
         percent_list = [int(p) for p in percent_list if 1 <= int(p) <= 100]
     else:
-        # Fallback: parse MCPs from user input if LLM did not match the tool
         percent_list = parse_mcp_levels_from_text(user_message)
 
     if cached_df is None or "latitude" not in cached_df or "longitude" not in cached_df:
@@ -348,8 +343,8 @@ def handle_chat(chat_history, user_message):
 
     add_mcps(cached_df, percent_list)
     requested_percents.update(percent_list)
-    print("MCP RESULTS:", mcp_results)
-    
+    save_all_mcps_zip()  # <--- Always save to disk after MCP calculation
+
     # Map drawing: overlay all requested MCPs
     df = cached_df
     m = folium.Map(location=[df["latitude"].mean(), df["longitude"].mean()], zoom_start=9)
@@ -364,16 +359,13 @@ def handle_chat(chat_history, user_message):
         attr="Esri", name="Satellite"
     ).add_to(m)
     points_layer = folium.FeatureGroup(name="Points", show=True)
-    # Create a layer for each requested MCP percent
     mcps_layers = {}
     for percent in requested_percents:
         mcps_layers[percent] = folium.FeatureGroup(name=f"MCP {percent}%", show=True)
-    
     paths_layer = folium.FeatureGroup(name="Tracks", show=True)
     points_layer = folium.FeatureGroup(name="Points", show=True)
     animal_ids = df["animal_id"].unique()
     color_map = {aid: f"#{random.randint(0, 0xFFFFFF):06x}" for aid in animal_ids}
-    
     for animal in animal_ids:
         track = df[df["animal_id"] == animal]
         color = color_map[animal]
@@ -415,9 +407,6 @@ def handle_chat(chat_history, user_message):
     chat_history = chat_history + [{"role": "assistant", "content": f"MCP home ranges ({', '.join(str(p) for p in percent_list)}%) calculated and displayed for each animal. Download all results below."}]
     return chat_history, gr.update(value=map_html), ""
 
-def download_results():
-    return save_all_mcps_zip()
-    
 with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     gr.Image(
         value="logo_long1.png",
@@ -483,7 +472,7 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
             map_output = gr.HTML(label="Map Preview", value=render_empty_map(), show_label=False)
             download_btn = gr.DownloadButton(
                 "📥 Download Results",
-                value=download_results,
+                value="outputs/spatchat_results.zip",
                 label="Download Results"
             )
 
