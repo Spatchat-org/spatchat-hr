@@ -189,7 +189,8 @@ def handle_upload_initial(file):
 
     guess = guess_utm_crs(df, found_x, found_y)
     if guess:
-        df["longitude"], df["latitude"] = guess["lons"], guess["lats"]
+        transformer = Transformer.from_crs(guess["epsg"], 4326, always_xy=True)
+        df["longitude"], df["latitude"] = transformer.transform(df[found_x].values, df[found_y].values)
         cached_df = df
         return [
             {"role": "assistant", "content": f"CSV uploaded. `{found_x}`/`{found_y}` appear to be UTM. Guessed zone **{guess['crs_label']}**. Please confirm or adjust below."}
