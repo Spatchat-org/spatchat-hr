@@ -477,12 +477,12 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
             map_output = gr.HTML(label="Map Preview", value=render_empty_map(), show_label=False)
             download_btn = gr.DownloadButton(
                 "📥 Download Results",
-                value=get_zipfile,  # function returning the file path
+                value=get_zipfile,
+                file_name="spatchat_results.zip",
                 label="Download Results",
                 visible=True,
                 interactive=True
             )
-
     file_input.change(
         fn=handle_upload_initial,
         inputs=file_input,
