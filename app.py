@@ -108,71 +108,6 @@ def looks_invalid_latlon(df, lat_col, lon_col):
     except Exception:
         return True
 
-def guess_utm_crs(df, x_col, y_col, sample_size=10):
-    """
-    Guess the most likely UTM zone and hemisphere for a dataframe
-    with projected coordinates (e.g., easting/northing), and return the
-    best zone and transformed sample lat/lon for confidence.
-    """
-    from pyproj import CRS
-
-    x = df[x_col].astype(float).values
-    y = df[y_col].astype(float).values
-
-    # Use a sample for performance
-    idxs = np.linspace(0, len(x) - 1, min(sample_size, len(x))).astype(int)
-    x_sample = x[idxs]
-    y_sample = y[idxs]
-
-    # Smart hemisphere guess: UTM northings in S hemisphere start at 10,000,000
-    if np.median(y) > 9_000_000:
-        hemisphere_candidates = ['S']
-    else:
-        hemisphere_candidates = ['N']
-
-    best_zone = None
-    best_score = -np.inf
-    best_epsg = None
-    best_latlon = None
-
-    # Optionally, restrict possible zones to plausible range for your area (e.g., Europe 28-38)
-    for hemisphere in hemisphere_candidates:
-        for zone in range(1, 61):
-            epsg = 32600 + zone if hemisphere == 'N' else 32700 + zone
-            try:
-                transformer = Transformer.from_crs(CRS.from_epsg(epsg), CRS.from_epsg(4326), always_xy=True)
-                lons, lats = transformer.transform(x_sample, y_sample)
-                lons = np.array(lons)
-                lats = np.array(lats)
-                if not (np.isfinite(lons).all() and np.isfinite(lats).all()):
-                    continue
-                # Check plausible lat/lon ranges
-                if not (np.all((lats >= -90) & (lats <= 90)) and np.all((lons >= -180) & (lons <= 180))):
-                    continue
-                # Score: smaller longitude error to zone center is better
-                central_meridian = -183 + zone * 6
-                lon_error = np.abs(np.mean(lons) - central_meridian)
-                score = -lon_error
-                if score > best_score:
-                    best_score = score
-                    best_zone = zone
-                    best_epsg = epsg
-                    best_latlon = (lats, lons)
-            except Exception:
-                continue
-
-    if best_zone and best_latlon is not None:
-        hemisphere = 'N' if best_epsg < 32700 else 'S'
-        return {
-            "zone": best_zone,
-            "hemisphere": hemisphere,
-            "epsg": best_epsg,
-            "crs_label": f"{best_zone}{hemisphere}",
-            "lats": best_latlon[0],
-            "lons": best_latlon[1]
-        }
-    return None
-
 def handle_upload_initial(file):
     global cached_df, cached_headers
     os.makedirs("uploads", exist_ok=True)
@@ -202,12 +137,13 @@ def handle_upload_initial(file):
                 {"role": "assistant", "content": "CSV uploaded. Latitude and longitude detected. You may now proceed to create home ranges."}
             ], *(gr.update(visible=False) for _ in range(3)), handle_upload_confirm("longitude", "latitude", ""), *(gr.update(visible=False) for _ in range(4))
 
-    # Try common fallback columns
-    fallback_cols = ["x", "y", "lon", "lat", "easting", "northing"]
+    # Try to auto-detect if lat/lon, else require user to specify X/Y and CRS
     x_names = ["x", "easting", "lon", "longitude"]
     y_names = ["y", "northing", "lat", "latitude"]
     found_x = next((col for col in df.columns if col.lower() in x_names), df.columns[0])
     found_y = next((col for col in df.columns if col.lower() in y_names and col != found_x), df.columns[1] if len(df.columns) > 1 else df.columns[0])
+    if found_x == found_y and len(df.columns) > 1:
+        found_y = df.columns[1 if df.columns[0] == found_x else 0]
     latlon_guess = looks_like_latlon(df, found_x, found_y)
     if latlon_guess:
         df["longitude"] = df[found_x] if latlon_guess == "lonlat" else df[found_y]
@@ -216,27 +152,15 @@ def handle_upload_initial(file):
         return [
             {"role": "assistant", "content": f"CSV uploaded. `{found_x}`/`{found_y}` interpreted as latitude/longitude."}
         ], *(gr.update(visible=False) for _ in range(3)), handle_upload_confirm("longitude", "latitude", ""), *(gr.update(visible=False) for _ in range(4))
-
-    guess = guess_utm_crs(df, found_x, found_y)
-    if guess:
-        transformer = Transformer.from_crs(guess["epsg"], 4326, always_xy=True)
-        df["longitude"], df["latitude"] = transformer.transform(df[found_x].values, df[found_y].values)
-        cached_df = df
-        return [
-            {"role": "assistant", "content": f"CSV uploaded. `{found_x}`/`{found_y}` appear to be UTM. Guessed zone **{guess['crs_label']}**. Please confirm or adjust below."}
-        ], \
-        gr.update(choices=cached_headers, value=found_x, visible=True), \
-        gr.update(choices=cached_headers, value=found_y, visible=True), \
-        gr.update(visible=True), handle_upload_confirm("longitude", "latitude", ""), \
-        gr.update(value=guess["crs_label"], visible=True), \
-        *(gr.update(visible=True) for _ in range(3))
-
+    
+    # If not lat/lon, prompt user for CRS
     return [
-        {"role": "assistant", "content": "CSV uploaded. Coordinate columns not clearly labeled. Please confirm and provide a CRS."}
+        {"role": "assistant", "content": f"CSV uploaded. Your coordinates do not appear to be latitude/longitude. Please specify X (easting), Y (northing), and the CRS/UTM zone below."}
     ], \
     gr.update(choices=cached_headers, value=found_x, visible=True), \
     gr.update(choices=cached_headers, value=found_y, visible=True), \
     gr.update(visible=True), render_empty_map(), *(gr.update(visible=True) for _ in range(4))
+
 
 def parse_crs_input(crs_input):
     crs_input = str(crs_input).strip().upper()
