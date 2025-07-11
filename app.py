@@ -13,7 +13,6 @@ from scipy.spatial import ConvexHull
 from shapely.geometry import Polygon, mapping
 import zipfile
 import re
-import tempfile
 
 print("Starting SpatChat (multi-MCP, robust download version)")
 
@@ -22,7 +21,6 @@ mcp_results = {}  # animal_id -> {percent: {"polygon": Polygon, "area": area_km2
 requested_percents = set()
 cached_df = None
 cached_headers = []
-latest_zipfile_path = None  # always points to the current results
 
 # ========== LLM SETUP (Together API) ==========
 load_dotenv()
@@ -108,10 +106,9 @@ def looks_invalid_latlon(df, lat_col, lon_col):
         return True
 
 def handle_upload_initial(file):
-    global cached_df, cached_headers, mcp_results, requested_percents, latest_zipfile_path
+    global cached_df, cached_headers, mcp_results, requested_percents
     mcp_results = {}
     requested_percents = set()
-    latest_zipfile_path = None
     os.makedirs("uploads", exist_ok=True)
     filename = os.path.join("uploads", os.path.basename(file))
     shutil.copy(file, filename)
@@ -120,7 +117,7 @@ def handle_upload_initial(file):
         cached_df = df
         cached_headers = list(df.columns)
     except Exception as e:
-        return [], *(gr.update(visible=False) for _ in range(8)), render_empty_map(), None
+        return [], *(gr.update(visible=False) for _ in range(8)), render_empty_map()
     lower_cols = [col.lower() for col in df.columns]
     if "latitude" in lower_cols and "longitude" in lower_cols:
         lat_col = df.columns[lower_cols.index("latitude")]
@@ -133,11 +130,11 @@ def handle_upload_initial(file):
             gr.update(choices=cached_headers, value=lat_col, visible=True), \
             gr.update(visible=True), \
             render_empty_map(), \
-            *(gr.update(visible=True) for _ in range(4)), None
+            *(gr.update(visible=True) for _ in range(4))
         else:
             return [
                 {"role": "assistant", "content": "CSV uploaded. Latitude and longitude detected. You may now proceed to create home ranges."}
-            ], *(gr.update(visible=False) for _ in range(3)), handle_upload_confirm("longitude", "latitude", ""), *(gr.update(visible=False) for _ in range(4)), None
+            ], *(gr.update(visible=False) for _ in range(3)), handle_upload_confirm("longitude", "latitude", ""), *(gr.update(visible=False) for _ in range(4))
 
     # Try to auto-detect if lat/lon, else require user to specify X/Y and CRS
     x_names = ["x", "easting", "lon", "longitude"]
@@ -153,14 +150,14 @@ def handle_upload_initial(file):
         cached_df = df
         return [
             {"role": "assistant", "content": f"CSV uploaded. `{found_x}`/`{found_y}` interpreted as latitude/longitude."}
-        ], *(gr.update(visible=False) for _ in range(3)), handle_upload_confirm("longitude", "latitude", ""), *(gr.update(visible=False) for _ in range(4)), None
+        ], *(gr.update(visible=False) for _ in range(3)), handle_upload_confirm("longitude", "latitude", ""), *(gr.update(visible=False) for _ in range(4))
     # If not lat/lon, prompt user for CRS
     return [
         {"role": "assistant", "content": f"CSV uploaded. Your coordinates do not appear to be latitude/longitude. Please specify X (easting), Y (northing), and the CRS/UTM zone below."}
     ], \
     gr.update(choices=cached_headers, value=found_x, visible=True), \
     gr.update(choices=cached_headers, value=found_y, visible=True), \
-    gr.update(visible=True), render_empty_map(), *(gr.update(visible=True) for _ in range(4)), None
+    gr.update(visible=True), render_empty_map(), *(gr.update(visible=True) for _ in range(4))
 
 def parse_crs_input(crs_input):
     crs_input = str(crs_input).strip().upper()
@@ -271,7 +268,6 @@ def add_mcps(df, percent_list):
                     mcp_results[animal][percent] = {"polygon": poly, "area": area_km2}
 
 def save_all_mcps_zip():
-    global latest_zipfile_path
     print("Writing output ZIP and results...")
     features = []
     for animal, percents in mcp_results.items():
@@ -297,14 +293,14 @@ def save_all_mcps_zip():
     df = pd.DataFrame(rows, columns=["animal_id", "percent", "area_km2"])
     csv_path = os.path.join("outputs", "mcp_areas.csv")
     df.to_csv(csv_path, index=False)
-    # Create a new temp file for each save
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".zip", dir="outputs")
-    with zipfile.ZipFile(tmp, "w") as zipf:
+    archive = "spatchat_results.zip"
+    if os.path.exists(archive):
+        os.remove(archive)
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zipf:
         zipf.write(geojson_path, arcname="mcps_all.geojson")
         zipf.write(csv_path, arcname="mcp_areas.csv")
-    latest_zipfile_path = tmp.name
-    print("ZIP written:", latest_zipfile_path)
-    return latest_zipfile_path
+    print("ZIP written:", archive)
+    return archive
 
 def parse_mcp_levels_from_text(text):
     levels = [int(val) for val in re.findall(r'\b([1-9][0-9]?|100)\b', text)]
@@ -405,13 +401,6 @@ def handle_chat(chat_history, user_message):
     chat_history = chat_history + [{"role": "assistant", "content": f"MCP home ranges ({', '.join(str(p) for p in percent_list)}%) calculated and displayed for each animal. Download all results below."}]
     return chat_history, gr.update(value=map_html), zip_fp
 
-def get_zipfile():
-    global latest_zipfile_path
-    if latest_zipfile_path is not None and os.path.exists(latest_zipfile_path):
-        return latest_zipfile_path
-    else:
-        return None
-
 with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     gr.Image(
         value="logo_long1.png",
@@ -477,17 +466,16 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
             map_output = gr.HTML(label="Map Preview", value=render_empty_map(), show_label=False)
             download_btn = gr.DownloadButton(
                 "📥 Download Results",
-                value=get_zipfile,
-                label="Download Results",
-                visible=True,
-                interactive=True
+                save_all_mcps_zip,
+                label="Download Results"
             )
+
     file_input.change(
         fn=handle_upload_initial,
         inputs=file_input,
         outputs=[
             chatbot, x_col, y_col, crs_input, map_output,
-            x_col, y_col, crs_input, confirm_btn, download_btn
+            x_col, y_col, crs_input, confirm_btn
         ]
     )
     confirm_btn.click(
