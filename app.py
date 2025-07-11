@@ -109,31 +109,59 @@ def looks_invalid_latlon(df, lat_col, lon_col):
         return True
 
 def guess_utm_crs(df, x_col, y_col, sample_size=10):
+    """
+    Guess the most likely UTM zone and hemisphere for a dataframe
+    with projected coordinates (e.g., easting/northing), and return the
+    best zone and transformed sample lat/lon for confidence.
+    """
     from pyproj import CRS
+
     x = df[x_col].astype(float).values
     y = df[y_col].astype(float).values
+
+    # Use a sample for performance
     idxs = np.linspace(0, len(x) - 1, min(sample_size, len(x))).astype(int)
     x_sample = x[idxs]
     y_sample = y[idxs]
-    best_zone, best_score, best_epsg, best_latlon = None, -np.inf, None, None
-    for hemisphere in ['N', 'S']:
+
+    # Smart hemisphere guess: UTM northings in S hemisphere start at 10,000,000
+    if np.median(y) > 9_000_000:
+        hemisphere_candidates = ['S']
+    else:
+        hemisphere_candidates = ['N']
+
+    best_zone = None
+    best_score = -np.inf
+    best_epsg = None
+    best_latlon = None
+
+    # Optionally, restrict possible zones to plausible range for your area (e.g., Europe 28-38)
+    for hemisphere in hemisphere_candidates:
         for zone in range(1, 61):
             epsg = 32600 + zone if hemisphere == 'N' else 32700 + zone
             try:
                 transformer = Transformer.from_crs(CRS.from_epsg(epsg), CRS.from_epsg(4326), always_xy=True)
                 lons, lats = transformer.transform(x_sample, y_sample)
+                lons = np.array(lons)
+                lats = np.array(lats)
                 if not (np.isfinite(lons).all() and np.isfinite(lats).all()):
                     continue
+                # Check plausible lat/lon ranges
                 if not (np.all((lats >= -90) & (lats <= 90)) and np.all((lons >= -180) & (lons <= 180))):
                     continue
-                lon_error = abs(np.mean(lons) - (-183 + zone * 6))
+                # Score: smaller longitude error to zone center is better
+                central_meridian = -183 + zone * 6
+                lon_error = np.abs(np.mean(lons) - central_meridian)
                 score = -lon_error
                 if score > best_score:
-                    best_score, best_zone, best_epsg = score, zone, epsg
+                    best_score = score
+                    best_zone = zone
+                    best_epsg = epsg
                     best_latlon = (lats, lons)
-            except:
+            except Exception:
                 continue
-    if best_zone and best_latlon:
+
+    if best_zone and best_latlon is not None:
         hemisphere = 'N' if best_epsg < 32700 else 'S'
         return {
             "zone": best_zone,
@@ -176,8 +204,10 @@ def handle_upload_initial(file):
 
     # Try common fallback columns
     fallback_cols = ["x", "y", "lon", "lat", "easting", "northing"]
-    found_x = next((col for col in df.columns if col.lower() in fallback_cols), df.columns[0])
-    found_y = next((col for col in df.columns if col.lower() in fallback_cols and col != found_x), df.columns[1])
+    x_names = ["x", "easting", "lon", "longitude"]
+    y_names = ["y", "northing", "lat", "latitude"]
+    found_x = next((col for col in df.columns if col.lower() in x_names), df.columns[0])
+    found_y = next((col for col in df.columns if col.lower() in y_names and col != found_x), df.columns[1] if len(df.columns) > 1 else df.columns[0])
     latlon_guess = looks_like_latlon(df, found_x, found_y)
     if latlon_guess:
         df["longitude"] = df[found_x] if latlon_guess == "lonlat" else df[found_y]
