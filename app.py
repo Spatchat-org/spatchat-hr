@@ -485,7 +485,7 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
             confirm_btn = gr.Button("Confirm Coordinate Settings", visible=False)
         with gr.Column(scale=3):
             map_output = gr.HTML(label="Map Preview", value=render_empty_map(), show_label=False)
-            download_btn = gr.DownloadButton("📥 Download Results", _get_zip_results)
+            download_btn = gr.DownloadButton("📥 Download Results", value="outputs/spatchat_results.zip")
 
     file_input.change(
         fn=handle_upload_initial,
