@@ -14,11 +14,13 @@ from shapely.geometry import Polygon, mapping
 import zipfile
 import re
 
-print("Starting SpatChat (multi-MCP version)")
+print("Starting SpatChat (multi-MCP, fixed download version)")
 
 # ====== GLOBAL MCP STORAGE ======
 mcp_results = {}  # animal_id -> {percent: {"polygon": Polygon, "area": area_km2}}
 requested_percents = set()
+cached_df = None
+cached_headers = []
 
 # ========== LLM SETUP (Together API) ==========
 load_dotenv()
@@ -60,10 +62,6 @@ def ask_llm(chat_history, user_input):
             temperature=0.7
         ).choices[0].message.content
         return None, conv
-
-# ========== App Logic ==========
-cached_df = None
-cached_headers = []
 
 def render_empty_map():
     m = folium.Map(location=[0, 0], zoom_start=2, control_scale=True)
@@ -261,7 +259,6 @@ def add_mcps(df, percent_list):
                 hull_points = mcp_polygon(track['latitude'].values, track['longitude'].values, percent)
                 if hull_points is not None:
                     poly = Polygon([(lon, lat) for lon, lat in hull_points])
-                    # Use WGS84 projection to meters for area (rough)
                     transformer = Transformer.from_crs("epsg:4326", "epsg:3857", always_xy=True)
                     coords_proj = [transformer.transform(lon, lat) for lon, lat in hull_points]
                     poly_proj = Polygon(coords_proj)
@@ -269,7 +266,7 @@ def add_mcps(df, percent_list):
                     mcp_results[animal][percent] = {"polygon": poly, "area": area_km2}
 
 def save_all_mcps_zip():
-    # Combine all MCPs into a single GeoJSON
+    print("Writing output ZIP and results...")
     features = []
     for animal, percents in mcp_results.items():
         for percent, v in percents.items():
@@ -287,7 +284,6 @@ def save_all_mcps_zip():
     geojson_path = "outputs/mcps_all.geojson"
     with open(geojson_path, "w") as f:
         json.dump(geojson, f)
-    # CSV
     rows = []
     for animal, percents in mcp_results.items():
         for percent, v in percents.items():
@@ -295,12 +291,11 @@ def save_all_mcps_zip():
     df = pd.DataFrame(rows, columns=["animal_id", "percent", "area_km2"])
     csv_path = "outputs/mcp_areas.csv"
     df.to_csv(csv_path, index=False)
-    # ZIP up the files
     zip_path = "outputs/spatchat_results.zip"
     with zipfile.ZipFile(zip_path, "w") as zipf:
         zipf.write(geojson_path, arcname="mcps_all.geojson")
         zipf.write(csv_path, arcname="mcp_areas.csv")
-    print(f"ZIP file saved at {zip_path}. Features in GeoJSON: {len(features)}, Rows in CSV: {len(rows)}")
+    print("ZIP written:", zip_path)
     return zip_path
 
 def parse_mcp_levels_from_text(text):
@@ -311,7 +306,6 @@ def parse_mcp_levels_from_text(text):
 
 def handle_chat(chat_history, user_message):
     global cached_df, mcp_results, requested_percents
-    # Respond to "area" or "mcp area"
     if "area" in user_message.lower():
         if not mcp_results:
             response = "No MCPs have been calculated yet."
@@ -343,9 +337,8 @@ def handle_chat(chat_history, user_message):
 
     add_mcps(cached_df, percent_list)
     requested_percents.update(percent_list)
-    save_all_mcps_zip()  # <--- Always save to disk after MCP calculation
+    print("MCP RESULTS:", mcp_results)
 
-    # Map drawing: overlay all requested MCPs
     df = cached_df
     m = folium.Map(location=[df["latitude"].mean(), df["longitude"].mean()], zoom_start=9)
     folium.TileLayer("OpenStreetMap").add_to(m)
@@ -363,19 +356,17 @@ def handle_chat(chat_history, user_message):
     for percent in requested_percents:
         mcps_layers[percent] = folium.FeatureGroup(name=f"MCP {percent}%", show=True)
     paths_layer = folium.FeatureGroup(name="Tracks", show=True)
-    points_layer = folium.FeatureGroup(name="Points", show=True)
     animal_ids = df["animal_id"].unique()
     color_map = {aid: f"#{random.randint(0, 0xFFFFFF):06x}" for aid in animal_ids}
+
     for animal in animal_ids:
         track = df[df["animal_id"] == animal]
         color = color_map[animal]
-        # Paths
         if "timestamp" in track.columns:
             track = track.sort_values("timestamp")
             coords = list(zip(track["latitude"], track["longitude"]))
             if len(coords) > 1:
                 folium.PolyLine(coords, color=color, weight=2.5, opacity=0.8, popup=f"{animal} Track").add_to(paths_layer)
-        # Points
         for idx, row in track.iterrows():
             folium.CircleMarker(
                 location=[row['latitude'], row['longitude']],
@@ -385,7 +376,6 @@ def handle_chat(chat_history, user_message):
                 fill_opacity=0.7,
                 popup=f"{animal}"
             ).add_to(points_layer)
-        # MCP polygons: one per percent, each in its own layer
         if animal in mcp_results:
             for percent, v in mcp_results[animal].items():
                 folium.Polygon(
@@ -394,18 +384,22 @@ def handle_chat(chat_history, user_message):
                     fill=True,
                     fill_opacity=0.2 + 0.6 * (percent / 100),
                     popup=f"{animal} MCP {percent}%"
-                ).add_to(mcps_layers[percent])    
+                ).add_to(mcps_layers[percent])
     points_layer.add_to(m)
     paths_layer.add_to(m)
     for layer in mcps_layers.values():
         layer.add_to(m)
-    paths_layer.add_to(m)
     folium.LayerControl(collapsed=False).add_to(m)
     m = fit_map_to_bounds(m, df)
     map_html = m._repr_html_()
     chat_history = chat_history + [{"role": "user", "content": user_message}]
     chat_history = chat_history + [{"role": "assistant", "content": f"MCP home ranges ({', '.join(str(p) for p in percent_list)}%) calculated and displayed for each animal. Download all results below."}]
     return chat_history, gr.update(value=map_html), ""
+
+def download_results():
+    print("Triggered download_results()")
+    # Only write the ZIP when the user clicks download
+    return save_all_mcps_zip()
 
 with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     gr.Image(
@@ -420,7 +414,7 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     <style>
     #logo-img img {
         height: 90px;
-        margin: 10px 50px 10px 10px;  /* top, right, bottom, left */
+        margin: 10px 50px 10px 10px;
         border-radius: 6px;
     }
     </style>
@@ -472,7 +466,7 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
             map_output = gr.HTML(label="Map Preview", value=render_empty_map(), show_label=False)
             download_btn = gr.DownloadButton(
                 "📥 Download Results",
-                value="outputs/spatchat_results.zip",
+                value=download_results,
                 label="Download Results"
             )
 
@@ -495,4 +489,4 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
         outputs=[chatbot, map_output, user_input]
     )
 
-demo.launch()
+demo.launch(ssr_mode=False)  # <--- KEY: disables SSR, required for download!
