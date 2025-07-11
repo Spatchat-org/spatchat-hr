@@ -161,7 +161,6 @@ def handle_upload_initial(file):
     gr.update(choices=cached_headers, value=found_y, visible=True), \
     gr.update(visible=True), render_empty_map(), *(gr.update(visible=True) for _ in range(4))
 
-
 def parse_crs_input(crs_input):
     crs_input = str(crs_input).strip().upper()
     if crs_input.startswith("EPSG:"):
@@ -176,24 +175,40 @@ def parse_crs_input(crs_input):
 def handle_upload_confirm(x_col, y_col, crs_input):
     global cached_df
     df = cached_df.copy()
+
+    # Check columns exist
     if x_col not in df.columns or y_col not in df.columns:
         return "<p>Selected coordinate columns not found in data.</p>"
+
+    # Direct lat/lon (no transform needed)
     if x_col.lower() in ["longitude", "lon"] and y_col.lower() in ["latitude", "lat"]:
         df['longitude'] = df[x_col]
         df['latitude'] = df[y_col]
+
+    # Need CRS transform
     else:
+        if not crs_input or crs_input.strip() == "":
+            return "<p>Please enter a CRS or UTM zone before confirming.</p>"
         try:
             epsg = parse_crs_input(crs_input)
             transformer = Transformer.from_crs(epsg, 4326, always_xy=True)
-            df['longitude'], df['latitude'] = transformer.transform(df[x_col].values, df[y_col].values)
+            df['longitude'], df['latitude'] = transformer.transform(
+                df[x_col].values, df[y_col].values
+            )
         except Exception as e:
             return f"<p>Failed to convert coordinates: {e}</p>"
+
+    # Parse timestamps and animal_id as usual
     has_timestamp = "timestamp" in df.columns
     has_animal_id = "animal_id" in df.columns
     if has_timestamp:
         df["timestamp"] = pd.to_datetime(df["timestamp"])
     if not has_animal_id:
         df["animal_id"] = "sample"
+
+    cached_df = df  # Always update the global cache!
+
+    # Render map preview
     m = folium.Map(location=[df["latitude"].mean(), df["longitude"].mean()], zoom_start=9, control_scale=True)
     folium.TileLayer("OpenStreetMap").add_to(m)
     folium.TileLayer("CartoDB positron", attr='CartoDB').add_to(m)
