@@ -87,6 +87,19 @@ def fit_map_to_bounds(m, df):
         m.fit_bounds([[min_lat, min_lon], [max_lat, max_lon]])
     return m
 
+def looks_like_latlon(df, x_col, y_col):
+    try:
+        x_vals = df[x_col].astype(float)
+        y_vals = df[y_col].astype(float)
+        # Check for lon/lat orientation
+        if x_vals.between(-180, 180).all() and y_vals.between(-90, 90).all():
+            return "lonlat"
+        if x_vals.between(-90, 90).all() and y_vals.between(-180, 180).all():
+            return "latlon"
+    except Exception:
+        return None
+    return None
+
 def handle_upload_initial(file):
     global cached_df, cached_headers
     os.makedirs("uploads", exist_ok=True)
@@ -98,18 +111,37 @@ def handle_upload_initial(file):
         cached_headers = list(df.columns)
     except Exception as e:
         return [], gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), render_empty_map(), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False)
+
     lower_cols = [col.lower() for col in df.columns]
     if "latitude" in lower_cols and "longitude" in lower_cols:
         return [
             {"role": "assistant", "content": "CSV uploaded successfully. Latitude and longitude detected. You may now proceed to create home ranges."}
         ], gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), handle_upload_confirm("longitude", "latitude", ""), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False)
-    preferred_x = next((col for col in df.columns if col.lower() in ["x", "easting"]), df.columns[0])
-    preferred_y = next((col for col in df.columns if col.lower() in ["y", "northing"]), df.columns[1] if len(df.columns) > 1 else df.columns[0])
+
+    # Try to guess from common coordinate names
+    fallback_cols = ["x", "y", "lon", "lat", "easting", "northing"]
+    found_x = next((col for col in df.columns if col.lower() in fallback_cols), df.columns[0])
+    found_y = next((col for col in df.columns if col.lower() in fallback_cols and col != found_x), df.columns[1] if len(df.columns) > 1 else df.columns[0])
+    latlon_guess = looks_like_latlon(df, found_x, found_y)
+
+    if latlon_guess:
+        if latlon_guess == "lonlat":
+            df["longitude"] = df[found_x]
+            df["latitude"] = df[found_y]
+        else:
+            df["longitude"] = df[found_y]
+            df["latitude"] = df[found_x]
+        cached_df = df
+        return [
+            {"role": "assistant", "content": f"CSV uploaded. Coordinates detected in `{found_x}`/`{found_y}` and interpreted as latitude/longitude."}
+        ], gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), handle_upload_confirm("longitude", "latitude", ""), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False)
+
+    # Fall back to manual input
     return [
         {"role": "assistant", "content": "CSV uploaded. Coordinate columns not clearly labeled. Please confirm X/Y columns and provide a CRS if needed. Be sure to click the Confirm button after filling these fields."}
     ], \
-    gr.update(choices=cached_headers, value=preferred_x, visible=True), \
-    gr.update(choices=cached_headers, value=preferred_y, visible=True), \
+    gr.update(choices=cached_headers, value=found_x, visible=True), \
+    gr.update(choices=cached_headers, value=found_y, visible=True), \
     gr.update(visible=True), \
     render_empty_map(), \
     gr.update(visible=True), gr.update(visible=True), gr.update(visible=True), gr.update(visible=True)
