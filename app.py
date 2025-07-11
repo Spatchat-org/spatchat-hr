@@ -19,7 +19,6 @@ print("Starting SpatChat (multi-MCP version)")
 # ====== GLOBAL MCP STORAGE ======
 mcp_results = {}  # animal_id -> {percent: {"polygon": Polygon, "area": area_km2}}
 requested_percents = set()
-zip_results = "outputs/spatchat_results.zip"  # Always points to latest ZIP
 
 # ========== LLM SETUP (Together API) ==========
 load_dotenv()
@@ -411,16 +410,9 @@ def handle_chat(chat_history, user_message):
     folium.LayerControl(collapsed=False).add_to(m)
     m = fit_map_to_bounds(m, df)
     map_html = m._repr_html_()
-    # After calculation, save ZIP and update zip_results path
-    global zip_results
-    zip_results = save_all_mcps_zip()
     chat_history = chat_history + [{"role": "user", "content": user_message}]
     chat_history = chat_history + [{"role": "assistant", "content": f"MCP home ranges ({', '.join(str(p) for p in percent_list)}%) calculated and displayed for each animal. Download all results below."}]
     return chat_history, gr.update(value=map_html), ""
-
-def _get_zip_results():
-    zip_path = "outputs/spatchat_results.zip"
-    return zip_path if os.path.exists(zip_path) else None
 
 with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     gr.Image(
@@ -485,7 +477,11 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
             confirm_btn = gr.Button("Confirm Coordinate Settings", visible=False)
         with gr.Column(scale=3):
             map_output = gr.HTML(label="Map Preview", value=render_empty_map(), show_label=False)
-            download_btn = gr.DownloadButton("📥 Download Results", value="outputs/spatchat_results.zip")
+            download_btn = gr.DownloadButton(
+                "📥 Download Results",
+                value=save_all_mcps_zip,
+                label="Download Results"
+            )
 
     file_input.change(
         fn=handle_upload_initial,
