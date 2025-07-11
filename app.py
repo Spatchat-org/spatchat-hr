@@ -13,14 +13,16 @@ from scipy.spatial import ConvexHull
 from shapely.geometry import Polygon, mapping
 import zipfile
 import re
+import tempfile
 
-print("Starting SpatChat (multi-MCP, reliable download version)")
+print("Starting SpatChat (multi-MCP, robust download version)")
 
 # ====== GLOBAL MCP STORAGE ======
 mcp_results = {}  # animal_id -> {percent: {"polygon": Polygon, "area": area_km2}}
 requested_percents = set()
 cached_df = None
 cached_headers = []
+latest_zipfile_path = None  # always points to the current results
 
 # ========== LLM SETUP (Together API) ==========
 load_dotenv()
@@ -106,7 +108,10 @@ def looks_invalid_latlon(df, lat_col, lon_col):
         return True
 
 def handle_upload_initial(file):
-    global cached_df, cached_headers
+    global cached_df, cached_headers, mcp_results, requested_percents, latest_zipfile_path
+    mcp_results = {}
+    requested_percents = set()
+    latest_zipfile_path = None
     os.makedirs("uploads", exist_ok=True)
     filename = os.path.join("uploads", os.path.basename(file))
     shutil.copy(file, filename)
@@ -115,7 +120,7 @@ def handle_upload_initial(file):
         cached_df = df
         cached_headers = list(df.columns)
     except Exception as e:
-        return [], *(gr.update(visible=False) for _ in range(8)), render_empty_map()
+        return [], *(gr.update(visible=False) for _ in range(8)), render_empty_map(), None
     lower_cols = [col.lower() for col in df.columns]
     if "latitude" in lower_cols and "longitude" in lower_cols:
         lat_col = df.columns[lower_cols.index("latitude")]
@@ -128,11 +133,11 @@ def handle_upload_initial(file):
             gr.update(choices=cached_headers, value=lat_col, visible=True), \
             gr.update(visible=True), \
             render_empty_map(), \
-            *(gr.update(visible=True) for _ in range(4))
+            *(gr.update(visible=True) for _ in range(4)), None
         else:
             return [
                 {"role": "assistant", "content": "CSV uploaded. Latitude and longitude detected. You may now proceed to create home ranges."}
-            ], *(gr.update(visible=False) for _ in range(3)), handle_upload_confirm("longitude", "latitude", ""), *(gr.update(visible=False) for _ in range(4))
+            ], *(gr.update(visible=False) for _ in range(3)), handle_upload_confirm("longitude", "latitude", ""), *(gr.update(visible=False) for _ in range(4)), None
 
     # Try to auto-detect if lat/lon, else require user to specify X/Y and CRS
     x_names = ["x", "easting", "lon", "longitude"]
@@ -148,14 +153,14 @@ def handle_upload_initial(file):
         cached_df = df
         return [
             {"role": "assistant", "content": f"CSV uploaded. `{found_x}`/`{found_y}` interpreted as latitude/longitude."}
-        ], *(gr.update(visible=False) for _ in range(3)), handle_upload_confirm("longitude", "latitude", ""), *(gr.update(visible=False) for _ in range(4))
+        ], *(gr.update(visible=False) for _ in range(3)), handle_upload_confirm("longitude", "latitude", ""), *(gr.update(visible=False) for _ in range(4)), None
     # If not lat/lon, prompt user for CRS
     return [
         {"role": "assistant", "content": f"CSV uploaded. Your coordinates do not appear to be latitude/longitude. Please specify X (easting), Y (northing), and the CRS/UTM zone below."}
     ], \
     gr.update(choices=cached_headers, value=found_x, visible=True), \
     gr.update(choices=cached_headers, value=found_y, visible=True), \
-    gr.update(visible=True), render_empty_map(), *(gr.update(visible=True) for _ in range(4))
+    gr.update(visible=True), render_empty_map(), *(gr.update(visible=True) for _ in range(4)), None
 
 def parse_crs_input(crs_input):
     crs_input = str(crs_input).strip().upper()
@@ -266,6 +271,7 @@ def add_mcps(df, percent_list):
                     mcp_results[animal][percent] = {"polygon": poly, "area": area_km2}
 
 def save_all_mcps_zip():
+    global latest_zipfile_path
     print("Writing output ZIP and results...")
     features = []
     for animal, percents in mcp_results.items():
@@ -281,7 +287,7 @@ def save_all_mcps_zip():
             })
     geojson = {"type": "FeatureCollection", "features": features}
     os.makedirs("outputs", exist_ok=True)
-    geojson_path = "outputs/mcps_all.geojson"
+    geojson_path = os.path.join("outputs", "mcps_all.geojson")
     with open(geojson_path, "w") as f:
         json.dump(geojson, f)
     rows = []
@@ -289,16 +295,16 @@ def save_all_mcps_zip():
         for percent, v in percents.items():
             rows.append((animal, percent, v["area"]))
     df = pd.DataFrame(rows, columns=["animal_id", "percent", "area_km2"])
-    csv_path = "outputs/mcp_areas.csv"
+    csv_path = os.path.join("outputs", "mcp_areas.csv")
     df.to_csv(csv_path, index=False)
-    zip_path = "outputs/spatchat_results.zip"
-    if os.path.exists(zip_path):
-        os.remove(zip_path)
-    with zipfile.ZipFile(zip_path, "w") as zipf:
+    # Create a new temp file for each save
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".zip", dir="outputs")
+    with zipfile.ZipFile(tmp, "w") as zipf:
         zipf.write(geojson_path, arcname="mcps_all.geojson")
         zipf.write(csv_path, arcname="mcp_areas.csv")
-    print("ZIP written:", zip_path)
-    return zip_path
+    latest_zipfile_path = tmp.name
+    print("ZIP written:", latest_zipfile_path)
+    return latest_zipfile_path
 
 def parse_mcp_levels_from_text(text):
     levels = [int(val) for val in re.findall(r'\b([1-9][0-9]?|100)\b', text)]
@@ -321,7 +327,7 @@ def handle_chat(chat_history, user_message):
             response = f"### MCP Areas\n{header}\n{rows}"
         chat_history = chat_history + [{"role": "user", "content": user_message}]
         chat_history = chat_history + [{"role": "assistant", "content": response}]
-        return chat_history, gr.update(), ""
+        return chat_history, gr.update(), None
 
     tool, llm_output = ask_llm(chat_history, user_message)
     if tool and tool.get("tool") == "home_range" and tool.get("method") == "mcp":
@@ -335,13 +341,12 @@ def handle_chat(chat_history, user_message):
     if cached_df is None or "latitude" not in cached_df or "longitude" not in cached_df:
         chat_history = chat_history + [{"role": "user", "content": user_message}]
         chat_history = chat_history + [{"role": "assistant", "content": "CSV must be uploaded with 'latitude' and 'longitude' columns."}]
-        return chat_history, gr.update(), ""
+        return chat_history, gr.update(), None
 
     add_mcps(cached_df, percent_list)
     requested_percents.update(percent_list)
-
-    # --- SAVE THE RESULTS ZIP *IMMEDIATELY* ---
-    save_all_mcps_zip()
+    print("MCP RESULTS:", mcp_results)
+    zip_fp = save_all_mcps_zip()
 
     df = cached_df
     m = folium.Map(location=[df["latitude"].mean(), df["longitude"].mean()], zoom_start=9)
@@ -398,7 +403,14 @@ def handle_chat(chat_history, user_message):
     map_html = m._repr_html_()
     chat_history = chat_history + [{"role": "user", "content": user_message}]
     chat_history = chat_history + [{"role": "assistant", "content": f"MCP home ranges ({', '.join(str(p) for p in percent_list)}%) calculated and displayed for each animal. Download all results below."}]
-    return chat_history, gr.update(value=map_html), ""
+    return chat_history, gr.update(value=map_html), zip_fp
+
+def get_zipfile():
+    global latest_zipfile_path
+    if latest_zipfile_path is not None and os.path.exists(latest_zipfile_path):
+        return latest_zipfile_path
+    else:
+        return None
 
 with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     gr.Image(
@@ -465,8 +477,10 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
             map_output = gr.HTML(label="Map Preview", value=render_empty_map(), show_label=False)
             download_btn = gr.DownloadButton(
                 "📥 Download Results",
-                value="outputs/spatchat_results.zip",  # <--- Path only! No function call!
-                label="Download Results"
+                value=get_zipfile,  # function returning the file path
+                label="Download Results",
+                visible=True,
+                interactive=True
             )
 
     file_input.change(
@@ -474,7 +488,7 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
         inputs=file_input,
         outputs=[
             chatbot, x_col, y_col, crs_input, map_output,
-            x_col, y_col, crs_input, confirm_btn
+            x_col, y_col, crs_input, confirm_btn, download_btn
         ]
     )
     confirm_btn.click(
@@ -485,7 +499,7 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     user_input.submit(
         fn=handle_chat,
         inputs=[chatbot, user_input],
-        outputs=[chatbot, map_output, user_input]
+        outputs=[chatbot, map_output, download_btn]
     )
 
 demo.launch(ssr_mode=False)
