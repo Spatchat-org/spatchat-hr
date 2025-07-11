@@ -349,7 +349,6 @@ def handle_chat(chat_history, user_message):
     add_mcps(cached_df, percent_list)
     requested_percents.update(percent_list)
     print("MCP RESULTS:", mcp_results)
-    save_all_mcps_zip()
     
     # Map drawing: overlay all requested MCPs
     df = cached_df
@@ -416,6 +415,9 @@ def handle_chat(chat_history, user_message):
     chat_history = chat_history + [{"role": "assistant", "content": f"MCP home ranges ({', '.join(str(p) for p in percent_list)}%) calculated and displayed for each animal. Download all results below."}]
     return chat_history, gr.update(value=map_html), ""
 
+def download_results():
+    return save_all_mcps_zip()
+    
 with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     gr.Image(
         value="logo_long1.png",
@@ -481,7 +483,7 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
             map_output = gr.HTML(label="Map Preview", value=render_empty_map(), show_label=False)
             download_btn = gr.DownloadButton(
                 "📥 Download Results",
-                value="outputs/spatchat_results.zip",
+                value=download_results,
                 label="Download Results"
             )
 
