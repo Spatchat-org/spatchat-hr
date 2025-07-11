@@ -292,6 +292,8 @@ def save_all_mcps_zip():
     csv_path = "outputs/mcp_areas.csv"
     df.to_csv(csv_path, index=False)
     zip_path = "outputs/spatchat_results.zip"
+    if os.path.exists(zip_path):
+        os.remove(zip_path)
     with zipfile.ZipFile(zip_path, "w") as zipf:
         zipf.write(geojson_path, arcname="mcps_all.geojson")
         zipf.write(csv_path, arcname="mcp_areas.csv")
@@ -398,7 +400,6 @@ def handle_chat(chat_history, user_message):
 
 def download_results():
     print("Triggered download_results()")
-    # Only write the ZIP when the user clicks download
     return save_all_mcps_zip()
 
 with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
@@ -489,4 +490,4 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
         outputs=[chatbot, map_output, user_input]
     )
 
-demo.launch(ssr_mode=False)  # <--- KEY: disables SSR, required for download!
+demo.launch(ssr_mode=False)
