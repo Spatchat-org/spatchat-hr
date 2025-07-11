@@ -400,6 +400,7 @@ def handle_chat(chat_history, user_message):
 
 def download_results():
     print("Triggered download_results()")
+    print("Current MCP_RESULTS:", mcp_results)
     return save_all_mcps_zip()
 
 with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
