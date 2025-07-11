@@ -364,10 +364,16 @@ def handle_chat(chat_history, user_message):
         attr="Esri", name="Satellite"
     ).add_to(m)
     points_layer = folium.FeatureGroup(name="Points", show=True)
-    mcps_layer = folium.FeatureGroup(name="MCP Polygons", show=True)
+    # Create a layer for each requested MCP percent
+    mcps_layers = {}
+    for percent in requested_percents:
+        mcps_layers[percent] = folium.FeatureGroup(name=f"MCP {percent}%", show=True)
+    
     paths_layer = folium.FeatureGroup(name="Tracks", show=True)
+    points_layer = folium.FeatureGroup(name="Points", show=True)
     animal_ids = df["animal_id"].unique()
     color_map = {aid: f"#{random.randint(0, 0xFFFFFF):06x}" for aid in animal_ids}
+    
     for animal in animal_ids:
         track = df[df["animal_id"] == animal]
         color = color_map[animal]
@@ -387,18 +393,22 @@ def handle_chat(chat_history, user_message):
                 fill_opacity=0.7,
                 popup=f"{animal}"
             ).add_to(points_layer)
-        # MCP for each percent
+        # MCP polygons: one per percent, each in its own layer
         if animal in mcp_results:
             for percent, v in mcp_results[animal].items():
-                # Make different percent ranges semi-transparent and distinct
                 folium.Polygon(
                     locations=[(lat, lon) for lon, lat in np.array(v["polygon"].exterior.coords)],
                     color=color,
                     fill=True,
                     fill_opacity=0.2 + 0.6 * (percent / 100),
                     popup=f"{animal} MCP {percent}%"
-                ).add_to(mcps_layer)
+                ).add_to(mcps_layers[percent])
+    
     points_layer.add_to(m)
+    paths_layer.add_to(m)
+    for layer in mcps_layers.values():
+        layer.add_to(m)
+
     mcps_layer.add_to(m)
     paths_layer.add_to(m)
     folium.LayerControl(collapsed=False).add_to(m)
