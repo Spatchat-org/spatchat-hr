@@ -478,7 +478,7 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
             download_btn = gr.DownloadButton(
                 "📥 Download Results",
                 value=get_zipfile,
-                file_name="spatchat_results.zip",
+                filename="spatchat_results.zip",
                 label="Download Results",
                 visible=True,
                 interactive=True
