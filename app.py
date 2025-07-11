@@ -348,7 +348,9 @@ def handle_chat(chat_history, user_message):
 
     add_mcps(cached_df, percent_list)
     requested_percents.update(percent_list)
-
+    print("MCP RESULTS:", mcp_results)
+    save_all_mcps_zip()
+    
     # Map drawing: overlay all requested MCPs
     df = cached_df
     m = folium.Map(location=[df["latitude"].mean(), df["longitude"].mean()], zoom_start=9)
@@ -479,7 +481,7 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
             map_output = gr.HTML(label="Map Preview", value=render_empty_map(), show_label=False)
             download_btn = gr.DownloadButton(
                 "📥 Download Results",
-                value=save_all_mcps_zip,
+                value="outputs/spatchat_results.zip",
                 label="Download Results"
             )
 
