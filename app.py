@@ -402,14 +402,11 @@ def handle_chat(chat_history, user_message):
                     fill=True,
                     fill_opacity=0.2 + 0.6 * (percent / 100),
                     popup=f"{animal} MCP {percent}%"
-                ).add_to(mcps_layers[percent])
-    
+                ).add_to(mcps_layers[percent])    
     points_layer.add_to(m)
     paths_layer.add_to(m)
     for layer in mcps_layers.values():
         layer.add_to(m)
-
-    mcps_layer.add_to(m)
     paths_layer.add_to(m)
     folium.LayerControl(collapsed=False).add_to(m)
     m = fit_map_to_bounds(m, df)
@@ -422,7 +419,8 @@ def handle_chat(chat_history, user_message):
     return chat_history, gr.update(value=map_html), ""
 
 def _get_zip_results():
-    return save_all_mcps_zip() if os.path.exists("outputs/mcps_all.geojson") else None
+    zip_path = "outputs/spatchat_results.zip"
+    return zip_path if os.path.exists(zip_path) else None
 
 with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     gr.Image(
