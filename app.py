@@ -488,5 +488,6 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
         inputs=[chatbot, user_input],
         outputs=[chatbot, map_output, download_btn]
     )
+    user_input.submit(lambda *args: "", inputs=None, outputs=user_input)
 
 demo.launch(ssr_mode=False)
