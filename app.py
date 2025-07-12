@@ -379,8 +379,8 @@ def kde_home_range(latitudes, longitudes, percent=95, grid_size=200):
                               (lon_ne - lon_sw) / grid_size,
                               (lat_ne - lat_sw) / grid_size)
     ) as dst:
-        dst.write(Z, 1)
-
+        dst.write(np.flipud(Z), 1)   # <-- Flip vertically before writing!
+        
     # 11. Export contour as geojson
     geojson_fp = tempfile.mktemp(suffix=f"_kde_{percent}.geojson", dir="outputs")
     with open(geojson_fp, "w") as f:
