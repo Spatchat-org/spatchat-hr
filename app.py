@@ -387,7 +387,7 @@ def handle_chat(chat_history, user_message):
                     locations=[(lat, lon) for lon, lat in np.array(v["polygon"].exterior.coords)],
                     color=color,
                     fill=True,
-                    fill_opacity=0.2 + 0.6 * (percent / 100),
+                    fill_opacity=0.1 + 0.2 * (percent / 100),
                     popup=f"{animal} MCP {percent}%"
                 ).add_to(mcps_layers[percent])
     points_layer.add_to(m)
