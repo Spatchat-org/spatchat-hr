@@ -364,7 +364,8 @@ def kde_home_range(latitudes, longitudes, percent=95, grid_size=200):
     # 9. Area in km2 (in UTM units)
     area_km2 = mpoly_utm.area / 1e6
 
-    # 10. Save raster: transform UTM bounds to WGS84 for folium/rasterio
+    # 10. Save truncated raster: only top X% UD (mask all else to zero)
+    Z_masked = np.where(mask, Z, 0)
     tiff_fp = tempfile.mktemp(suffix=f"_kde_{percent}.tif", dir="outputs")
     # Get WGS84 for SW and NE corners
     lon_sw, lat_sw = to_latlon.transform(xmin, ymin)
@@ -372,14 +373,14 @@ def kde_home_range(latitudes, longitudes, percent=95, grid_size=200):
     with rasterio.open(
         tiff_fp, "w",
         driver="GTiff",
-        height=Z.shape[0], width=Z.shape[1],
-        count=1, dtype=Z.dtype,
+        height=Z_masked.shape[0], width=Z_masked.shape[1],
+        count=1, dtype=Z_masked.dtype,
         crs="EPSG:4326",
         transform=from_origin(lon_sw, lat_ne,
                               (lon_ne - lon_sw) / grid_size,
                               (lat_ne - lat_sw) / grid_size)
     ) as dst:
-        dst.write(np.flipud(Z), 1)   # <-- Flip vertically before writing!
+        dst.write(np.flipud(Z_masked), 1)
         
     # 11. Export contour as geojson
     geojson_fp = tempfile.mktemp(suffix=f"_kde_{percent}.geojson", dir="outputs")
@@ -549,43 +550,56 @@ def handle_chat(chat_history, user_message):
 def save_all_mcps_zip():
     os.makedirs("outputs", exist_ok=True)
     features = []
-    for animal, percents in mcp_results.items():
-        for percent, v in percents.items():
-            features.append({
-                "type": "Feature",
-                "properties": {
-                    "animal_id": animal,
-                    "percent": percent,
-                    "area_km2": v["area"]
-                },
-                "geometry": mapping(v["polygon"])
-            })
-    geojson = {"type": "FeatureCollection", "features": features}
-    geojson_path = os.path.join("outputs", "mcps_all.geojson")
-    with open(geojson_path, "w") as f:
-        json.dump(geojson, f)
     rows = []
-    for animal, percents in mcp_results.items():
-        for percent, v in percents.items():
-            rows.append((animal, f"MCP-{percent}", v["area"]))
+
+    # Save MCP geojson only if there are results
+    if any(mcp_results.values()):
+        for animal, percents in mcp_results.items():
+            for percent, v in percents.items():
+                features.append({
+                    "type": "Feature",
+                    "properties": {
+                        "animal_id": animal,
+                        "percent": percent,
+                        "area_km2": v["area"]
+                    },
+                    "geometry": mapping(v["polygon"])
+                })
+                rows.append((animal, f"MCP-{percent}", v["area"]))
+        geojson = {"type": "FeatureCollection", "features": features}
+        geojson_path = os.path.join("outputs", "mcps_all.geojson")
+        with open(geojson_path, "w") as f:
+            json.dump(geojson, f)
+    else:
+        geojson_path = None
+
+    # Add KDE results (area row and save files if present)
     for animal, percents in kde_results.items():
         for percent, v in percents.items():
             rows.append((animal, f"KDE-{percent}", v["area"]))
-    df = pd.DataFrame(rows, columns=["animal_id", "type", "area_km2"])
-    csv_path = os.path.join("outputs", "home_range_areas.csv")
-    df.to_csv(csv_path, index=False)
+    # Save CSV if there are any results
+    if rows:
+        df = pd.DataFrame(rows, columns=["animal_id", "type", "area_km2"])
+        csv_path = os.path.join("outputs", "home_range_areas.csv")
+        df.to_csv(csv_path, index=False)
+    else:
+        csv_path = None
+
     archive = "spatchat_results.zip"
     if os.path.exists(archive):
         os.remove(archive)
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zipf:
-        zipf.write(geojson_path, arcname="mcps_all.geojson")
-        zipf.write(csv_path, arcname="home_range_areas.csv")
+        # Only add if present
+        if geojson_path and os.path.exists(geojson_path):
+            zipf.write(geojson_path, arcname="mcps_all.geojson")
+        if csv_path and os.path.exists(csv_path):
+            zipf.write(csv_path, arcname="home_range_areas.csv")
         # Add all KDE outputs (GeoTIFFs + GeoJSONs)
         for animal, percents in kde_results.items():
             for percent, v in percents.items():
-                if v.get("geotiff"):
+                if v.get("geotiff") and os.path.exists(v["geotiff"]):
                     zipf.write(v["geotiff"], arcname=f"kde_{animal}_{percent}.tif")
-                if v.get("geojson"):
+                if v.get("geojson") and os.path.exists(v["geojson"]):
                     zipf.write(v["geojson"], arcname=f"kde_{animal}_{percent}.geojson")
     print("ZIP written:", archive)
     return archive
