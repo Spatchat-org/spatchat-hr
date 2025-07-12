@@ -10,3 +10,4 @@ geopandas
 rasterio
 scikit-image
 matplotlib
+scikit-learn
