@@ -18,6 +18,7 @@ from rasterio.transform import from_origin
 import matplotlib.pyplot as plt
 from scipy.stats import gaussian_kde
 from skimage import measure
+from sklearn.neighbors import KernelDensity
 import tempfile
 
 print("Starting SpatChat (multi-MCP/KDE, robust download version)")
@@ -285,43 +286,58 @@ def add_mcps(df, percent_list):
 
 # ========== KDE Section ==========
 def kde_home_range(latitudes, longitudes, percent=95, grid_size=200):
-    # === 1. Choose UTM zone based on mean location ===
+    # 1. Project to UTM zone based on mean location
     lon0, lat0 = np.mean(longitudes), np.mean(latitudes)
     utm_zone = int((lon0 + 180) // 6) + 1
     epsg_utm = 32600 + utm_zone if lat0 >= 0 else 32700 + utm_zone
-    # Project points to UTM
     to_utm = Transformer.from_crs("epsg:4326", f"epsg:{epsg_utm}", always_xy=True)
     to_latlon = Transformer.from_crs(f"epsg:{epsg_utm}", "epsg:4326", always_xy=True)
     x, y = to_utm.transform(longitudes, latitudes)
-    xy = np.vstack([x, y])
+    xy = np.vstack([x, y]).T
 
-    # === 2. KDE in UTM ===
-    kde = gaussian_kde(xy)
-    xmin, xmax = x.min(), x.max()
-    ymin, ymax = y.min(), y.max()
+    # 2. Reference bandwidth (Silverman’s rule of thumb)
+    n = xy.shape[0]
+    if n > 1:
+        stds = np.std(xy, axis=0, ddof=1)
+        h = np.power(4 / (3 * n), 1 / 5) * np.mean(stds)
+        if h < 1:  # In case points are coincident, fallback
+            h = 30.0
+    else:
+        h = 30.0
+
+    # 3. Grid definition in projected coordinates
+    margin = 3 * h
+    xmin, xmax = x.min() - margin, x.max() + margin
+    ymin, ymax = y.min() - margin, y.max() + margin
     x_grid = np.linspace(xmin, xmax, grid_size)
     y_grid = np.linspace(ymin, ymax, grid_size)
     X, Y = np.meshgrid(x_grid, y_grid)
-    positions = np.vstack([X.ravel(), Y.ravel()])
-    Z = kde(positions).reshape(X.shape)
+    grid_points = np.vstack([X.ravel(), Y.ravel()]).T
 
-    # === 3. Find threshold for the requested percentile contour ===
+    # 4. KDE estimation in UTM meters
+    kde = KernelDensity(bandwidth=h, kernel="gaussian")
+    kde.fit(xy)
+    Z = np.exp(kde.score_samples(grid_points)).reshape(X.shape)
+
+    # 5. Normalize UD so cell sum = 1 (important for cumulative probability contouring)
+    cell_area = (x_grid[1] - x_grid[0]) * (y_grid[1] - y_grid[0])
+    Z /= (Z.sum() * cell_area)  # Now sum(Z * cell_area) == 1
+
+    # 6. Find threshold for requested percentile
     Z_flat = Z.flatten()
-    idx = np.argsort(Z_flat)[::-1]
-    cumsum = np.cumsum(Z_flat[idx])
-    cumsum /= cumsum[-1]
-    threshold = Z_flat[idx][np.searchsorted(cumsum, percent / 100.0)]
+    idx_desc = np.argsort(Z_flat)[::-1]
+    cumsum = np.cumsum(Z_flat[idx_desc] * cell_area)
+    threshold = Z_flat[idx_desc][np.searchsorted(cumsum, percent / 100.0)]
     mask = Z >= threshold
 
-    # === 4. Extract contour(s) in UTM ===
+    # 7. Extract contour(s) at the threshold in UTM meters
     contours = measure.find_contours(mask.astype(float), 0.5)
     polygons = []
     for contour in contours:
         px, py = contour[:, 1], contour[:, 0]
         utm_xs = np.interp(px, np.arange(grid_size), x_grid)
         utm_ys = np.interp(py, np.arange(grid_size), y_grid)
-        poly = Polygon(zip(utm_xs, utm_ys))
-        poly = poly.buffer(0)
+        poly = Polygon(zip(utm_xs, utm_ys)).buffer(0)
         if poly.is_valid and poly.area > 0:
             polygons.append(poly)
     if not polygons:
@@ -329,7 +345,7 @@ def kde_home_range(latitudes, longitudes, percent=95, grid_size=200):
     from shapely.ops import unary_union
     mpoly_utm = unary_union(polygons)
 
-    # === 5. Transform contour(s) back to lat/lon for mapping/export ===
+    # 8. Transform contour(s) back to lat/lon for mapping/export
     def utm_poly_to_latlon(poly):
         if poly.is_empty:
             return None
@@ -345,10 +361,10 @@ def kde_home_range(latitudes, longitudes, percent=95, grid_size=200):
 
     mpoly_latlon = utm_poly_to_latlon(mpoly_utm)
 
-    # === 6. Area in km2 (in UTM units) ===
+    # 9. Area in km2 (in UTM units)
     area_km2 = mpoly_utm.area / 1e6
 
-    # === 7. Save raster: Convert UTM grid to WGS84 bounds ===
+    # 10. Save raster: transform UTM bounds to WGS84 for folium/rasterio
     tiff_fp = tempfile.mktemp(suffix=f"_kde_{percent}.tif", dir="outputs")
     # Get WGS84 for SW and NE corners
     lon_sw, lat_sw = to_latlon.transform(xmin, ymin)
@@ -365,7 +381,7 @@ def kde_home_range(latitudes, longitudes, percent=95, grid_size=200):
     ) as dst:
         dst.write(Z, 1)
 
-    # === 8. Export contour as geojson ===
+    # 11. Export contour as geojson
     geojson_fp = tempfile.mktemp(suffix=f"_kde_{percent}.geojson", dir="outputs")
     with open(geojson_fp, "w") as f:
         json.dump(mapping(mpoly_latlon), f)
