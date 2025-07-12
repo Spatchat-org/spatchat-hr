@@ -303,9 +303,14 @@ def kde_home_range(latitudes, longitudes, percent=95, grid_size=200):
     contours = measure.find_contours(mask.astype(float), 0.5)
     polygons = []
     for contour in contours:
-        poly_xy = np.array([ [X[int(p[0]), int(p[1])], Y[int(p[0]), int(p[1])]] for p in contour ])
+        poly_xy = np.array([[X[int(p[0]), int(p[1])], Y[int(p[0]), int(p[1])]] for p in contour])
         if len(poly_xy) >= 3:
-            polygons.append(Polygon(poly_xy))
+            poly = Polygon(poly_xy)
+            # Fix invalid polygons by buffering 0 (standard trick)
+            if not poly.is_valid:
+                poly = poly.buffer(0)
+            if poly.is_valid and poly.area > 0:
+                polygons.append(poly)
     if not polygons:
         return None, None, None, None, None, None, None
     from shapely.ops import unary_union
