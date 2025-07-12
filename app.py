@@ -13,12 +13,22 @@ from scipy.spatial import ConvexHull
 from shapely.geometry import Polygon, mapping
 import zipfile
 import re
+from shapely.geometry import shape, MultiPolygon, Polygon
+from shapely.ops import unary_union
+import rasterio
+from rasterio.transform import from_origin
+import matplotlib.pyplot as plt
+from scipy.stats import gaussian_kde
+from skimage import measure
+import tempfile
 
-print("Starting SpatChat (multi-MCP, robust download version)")
+print("Starting SpatChat (multi-MCP/KDE, robust download version)")
 
-# ====== GLOBAL MCP STORAGE ======
-mcp_results = {}  # animal_id -> {percent: {"polygon": Polygon, "area": area_km2}}
+# ====== GLOBAL STORAGE ======
+mcp_results = {}    # animal_id -> {percent: {"polygon": Polygon, "area": area_km2}}
+kde_results = {}    # animal_id -> {percent: {"contour": Polygon/MultiPolygon, "area": area_km2, "geotiff": path, "geojson": path}}
 requested_percents = set()
+requested_kde_percents = set()
 cached_df = None
 cached_headers = []
 
@@ -55,7 +65,6 @@ def ask_llm(chat_history, user_input):
         call = json.loads(resp)
         return call, resp
     except Exception:
-        # fallback: try conversational response
         conv = client.chat.completions.create(
             model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
             messages=[{"role": "system", "content": FALLBACK_PROMPT}] + messages,
@@ -85,156 +94,14 @@ def fit_map_to_bounds(m, df):
         m.fit_bounds([[min_lat, min_lon], [max_lat, max_lon]])
     return m
 
-def looks_like_latlon(df, x_col, y_col):
-    try:
-        x_vals = df[x_col].astype(float)
-        y_vals = df[y_col].astype(float)
-        if x_vals.between(-180, 180).all() and y_vals.between(-90, 90).all():
-            return "lonlat"
-        if x_vals.between(-90, 90).all() and y_vals.between(-180, 180).all():
-            return "latlon"
-    except Exception:
-        return None
-    return None
+def parse_levels_from_text(text):
+    # Extracts all percentages 1-100 in string
+    levels = [int(val) for val in re.findall(r'\b([1-9][0-9]?|100)\b', text)]
+    if not levels:
+        return [95]
+    return sorted(set(levels))
 
-def looks_invalid_latlon(df, lat_col, lon_col):
-    try:
-        lat = df[lat_col].astype(float)
-        lon = df[lon_col].astype(float)
-        return not (lat.between(-90, 90).all() and lon.between(-180, 180).all())
-    except Exception:
-        return True
-
-def handle_upload_initial(file):
-    global cached_df, cached_headers, mcp_results, requested_percents
-    mcp_results = {}
-    requested_percents = set()
-    os.makedirs("uploads", exist_ok=True)
-    filename = os.path.join("uploads", os.path.basename(file))
-    shutil.copy(file, filename)
-    try:
-        df = pd.read_csv(filename)
-        cached_df = df
-        cached_headers = list(df.columns)
-    except Exception as e:
-        return [], *(gr.update(visible=False) for _ in range(8)), render_empty_map()
-    lower_cols = [col.lower() for col in df.columns]
-    if "latitude" in lower_cols and "longitude" in lower_cols:
-        lat_col = df.columns[lower_cols.index("latitude")]
-        lon_col = df.columns[lower_cols.index("longitude")]
-        if looks_invalid_latlon(df, lat_col, lon_col):
-            return [
-                {"role": "assistant", "content": "Your columns are labeled `latitude` and `longitude`, but the values do not look like geographic coordinates. Please confirm your coordinate system below."}
-            ], \
-            gr.update(choices=cached_headers, value=lon_col, visible=True), \
-            gr.update(choices=cached_headers, value=lat_col, visible=True), \
-            gr.update(visible=True), \
-            render_empty_map(), \
-            *(gr.update(visible=True) for _ in range(4))
-        else:
-            return [
-                {"role": "assistant", "content": "CSV uploaded. Latitude and longitude detected. You may now proceed to create home ranges."}
-            ], *(gr.update(visible=False) for _ in range(3)), handle_upload_confirm("longitude", "latitude", ""), *(gr.update(visible=False) for _ in range(4))
-
-    # Try to auto-detect if lat/lon, else require user to specify X/Y and CRS
-    x_names = ["x", "easting", "lon", "longitude"]
-    y_names = ["y", "northing", "lat", "latitude"]
-    found_x = next((col for col in df.columns if col.lower() in x_names), df.columns[0])
-    found_y = next((col for col in df.columns if col.lower() in y_names and col != found_x), df.columns[1] if len(df.columns) > 1 else df.columns[0])
-    if found_x == found_y and len(df.columns) > 1:
-        found_y = df.columns[1 if df.columns[0] == found_x else 0]
-    latlon_guess = looks_like_latlon(df, found_x, found_y)
-    if latlon_guess:
-        df["longitude"] = df[found_x] if latlon_guess == "lonlat" else df[found_y]
-        df["latitude"] = df[found_y] if latlon_guess == "lonlat" else df[found_x]
-        cached_df = df
-        return [
-            {"role": "assistant", "content": f"CSV uploaded. `{found_x}`/`{found_y}` interpreted as latitude/longitude."}
-        ], *(gr.update(visible=False) for _ in range(3)), handle_upload_confirm("longitude", "latitude", ""), *(gr.update(visible=False) for _ in range(4))
-    # If not lat/lon, prompt user for CRS
-    return [
-        {"role": "assistant", "content": f"CSV uploaded. Your coordinates do not appear to be latitude/longitude. Please specify X (easting), Y (northing), and the CRS/UTM zone below."}
-    ], \
-    gr.update(choices=cached_headers, value=found_x, visible=True), \
-    gr.update(choices=cached_headers, value=found_y, visible=True), \
-    gr.update(visible=True), render_empty_map(), *(gr.update(visible=True) for _ in range(4))
-
-def parse_crs_input(crs_input):
-    crs_input = str(crs_input).strip().upper()
-    if crs_input.startswith("EPSG:"):
-        return int(crs_input.split(":")[1])
-    if crs_input.isdigit():
-        return 32600 + int(crs_input)
-    if len(crs_input) >= 2 and crs_input[:-1].isdigit() and crs_input[-1] in ("N", "S"):
-        zone = int(crs_input[:-1])
-        return 32600 + zone if crs_input[-1] == "N" else 32700 + zone
-    raise ValueError("Invalid CRS input. Use EPSG code or UTM zone like '33N'.")
-
-def handle_upload_confirm(x_col, y_col, crs_input):
-    global cached_df
-    df = cached_df.copy()
-    if x_col not in df.columns or y_col not in df.columns:
-        return "<p>Selected coordinate columns not found in data.</p>"
-    if x_col.lower() in ["longitude", "lon"] and y_col.lower() in ["latitude", "lat"]:
-        df['longitude'] = df[x_col]
-        df['latitude'] = df[y_col]
-    else:
-        if not crs_input or crs_input.strip() == "":
-            return "<p>Please enter a CRS or UTM zone before confirming.</p>"
-        try:
-            epsg = parse_crs_input(crs_input)
-            transformer = Transformer.from_crs(epsg, 4326, always_xy=True)
-            df['longitude'], df['latitude'] = transformer.transform(
-                df[x_col].values, df[y_col].values
-            )
-        except Exception as e:
-            return f"<p>Failed to convert coordinates: {e}</p>"
-    has_timestamp = "timestamp" in df.columns
-    has_animal_id = "animal_id" in df.columns
-    if has_timestamp:
-        df["timestamp"] = pd.to_datetime(df["timestamp"])
-    if not has_animal_id:
-        df["animal_id"] = "sample"
-    cached_df = df
-    m = folium.Map(location=[df["latitude"].mean(), df["longitude"].mean()], zoom_start=9, control_scale=True)
-    folium.TileLayer("OpenStreetMap").add_to(m)
-    folium.TileLayer("CartoDB positron", attr='CartoDB').add_to(m)
-    folium.TileLayer(
-        tiles="https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
-        attr="OpenTopoMap", name="Topographic"
-    ).add_to(m)
-    folium.TileLayer(
-        tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-        attr="Esri", name="Satellite"
-    ).add_to(m)
-    points_layer = folium.FeatureGroup(name="Points", show=True)
-    lines_layer = folium.FeatureGroup(name="Tracks", show=True)
-    animal_ids = df["animal_id"].unique()
-    color_map = {aid: f"#{random.randint(0, 0xFFFFFF):06x}" for aid in animal_ids}
-    for animal in animal_ids:
-        track = df[df["animal_id"] == animal]
-        coords = list(zip(track["latitude"], track["longitude"]))
-        color = color_map[animal]
-        if has_timestamp:
-            track = track.sort_values("timestamp")
-            folium.PolyLine(coords, color=color, weight=2.5, opacity=0.8, popup=animal).add_to(lines_layer)
-        for _, row in track.iterrows():
-            label = f"{animal}" + (f"<br>{row['timestamp']}" if has_timestamp else "")
-            folium.CircleMarker(
-                location=[row["latitude"], row["longitude"]],
-                radius=3,
-                popup=label,
-                color=color,
-                fill=True,
-                fill_opacity=0.7
-            ).add_to(points_layer)
-    points_layer.add_to(m)
-    if has_timestamp:
-        lines_layer.add_to(m)
-    folium.LayerControl(collapsed=False).add_to(m)
-    m = fit_map_to_bounds(m, df)
-    return m._repr_html_()
-
+# ========== MCP Functions ==========
 def mcp_polygon(latitudes, longitudes, percent=95):
     points = np.column_stack((longitudes, latitudes))
     if len(points) < 3:
@@ -267,83 +134,111 @@ def add_mcps(df, percent_list):
                     area_km2 = poly_proj.area / 1e6
                     mcp_results[animal][percent] = {"polygon": poly, "area": area_km2}
 
-def save_all_mcps_zip():
-    print("Writing output ZIP and results...")
-    features = []
-    for animal, percents in mcp_results.items():
-        for percent, v in percents.items():
-            features.append({
-                "type": "Feature",
-                "properties": {
-                    "animal_id": animal,
-                    "percent": percent,
-                    "area_km2": v["area"]
-                },
-                "geometry": mapping(v["polygon"])
-            })
-    geojson = {"type": "FeatureCollection", "features": features}
+# ========== KDE Section ==========
+def kde_home_range(latitudes, longitudes, percent=95, grid_size=200):
+    # Estimate bandwidth automatically, grid centered on data
+    xy = np.vstack([longitudes, latitudes])
+    kde = gaussian_kde(xy)
+    xmin, xmax = longitudes.min(), longitudes.max()
+    ymin, ymax = latitudes.min(), latitudes.max()
+    x_grid = np.linspace(xmin, xmax, grid_size)
+    y_grid = np.linspace(ymin, ymax, grid_size)
+    X, Y = np.meshgrid(x_grid, y_grid)
+    positions = np.vstack([X.ravel(), Y.ravel()])
+    Z = kde(positions).reshape(X.shape)
+    # find the density threshold for the desired percent
+    Z_flat = Z.flatten()
+    idx = np.argsort(Z_flat)[::-1]  # sort descending
+    cumsum = np.cumsum(Z_flat[idx])
+    cumsum /= cumsum[-1]
+    threshold = Z_flat[idx][np.searchsorted(cumsum, percent / 100.0)]
+    # Get mask
+    mask = Z >= threshold
+    # Find contours (in y, x grid)
+    contours = measure.find_contours(mask.astype(float), 0.5)
+    polygons = []
+    for contour in contours:
+        poly_xy = np.array([ [X[int(p[0]), int(p[1])], Y[int(p[0]), int(p[1])]] for p in contour ])
+        if len(poly_xy) >= 3:
+            polygons.append(Polygon(poly_xy))
+    if not polygons:
+        return None, None, None, None
+    mpoly = unary_union(polygons)
+    # Area in degrees: just for demonstration
+    transformer = Transformer.from_crs("epsg:4326", "epsg:3857", always_xy=True)
+    coords_proj = [transformer.transform(*pt) for pt in np.vstack([p.exterior.coords for p in polygons if isinstance(p, Polygon)])]
+    poly_proj = Polygon(coords_proj)
+    area_km2 = poly_proj.area / 1e6
+    # Export raster as geotiff
+    tiff_fp = tempfile.mktemp(suffix=f"_kde_{percent}.tif", dir="outputs")
+    with rasterio.open(
+        tiff_fp, "w",
+        driver="GTiff",
+        height=Z.shape[0], width=Z.shape[1],
+        count=1, dtype=Z.dtype,
+        crs="EPSG:4326",
+        transform=from_origin(xmin, ymax, (xmax-xmin)/grid_size, (ymax-ymin)/grid_size)
+    ) as dst:
+        dst.write(Z, 1)
+    # Export contour as geojson
+    geojson_fp = tempfile.mktemp(suffix=f"_kde_{percent}.geojson", dir="outputs")
+    with open(geojson_fp, "w") as f:
+        json.dump(mapping(mpoly), f)
+    return mpoly, area_km2, tiff_fp, geojson_fp, Z, x_grid, y_grid
+
+def add_kdes(df, percent_list):
+    global kde_results
     os.makedirs("outputs", exist_ok=True)
-    geojson_path = os.path.join("outputs", "mcps_all.geojson")
-    with open(geojson_path, "w") as f:
-        json.dump(geojson, f)
-    rows = []
-    for animal, percents in mcp_results.items():
-        for percent, v in percents.items():
-            rows.append((animal, percent, v["area"]))
-    df = pd.DataFrame(rows, columns=["animal_id", "percent", "area_km2"])
-    csv_path = os.path.join("outputs", "mcp_areas.csv")
-    df.to_csv(csv_path, index=False)
-    archive = "spatchat_results.zip"
-    if os.path.exists(archive):
-        os.remove(archive)
-    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zipf:
-        zipf.write(geojson_path, arcname="mcps_all.geojson")
-        zipf.write(csv_path, arcname="mcp_areas.csv")
-    print("ZIP written:", archive)
-    return archive
+    for percent in percent_list:
+        for animal in df["animal_id"].unique():
+            if animal not in kde_results:
+                kde_results[animal] = {}
+            if percent not in kde_results[animal]:
+                track = df[df["animal_id"] == animal]
+                mpoly, area_km2, tiff_fp, geojson_fp, *_ = kde_home_range(
+                    track['latitude'].values, track['longitude'].values, percent
+                )
+                if mpoly is not None:
+                    kde_results[animal][percent] = {
+                        "contour": mpoly, "area": area_km2,
+                        "geotiff": tiff_fp, "geojson": geojson_fp
+                    }
 
-def parse_mcp_levels_from_text(text):
-    levels = [int(val) for val in re.findall(r'\b([1-9][0-9]?|100)\b', text)]
-    if not levels:
-        return [95]
-    return sorted(set(levels))
-
+# ========== Main Handlers ==========
 def handle_chat(chat_history, user_message):
-    global cached_df, mcp_results, requested_percents
-    if "area" in user_message.lower():
-        if not mcp_results:
-            response = "No MCPs have been calculated yet."
-        else:
-            header = "| Animal ID | MCP | Area (km²) |\n|---|---|---|"
-            rows = "\n".join(
-                f"| {aid} | {pct}% | {v['area']:.2f} |"
-                for aid, percs in mcp_results.items()
-                for pct, v in percs.items()
-            )
-            response = f"### MCP Areas\n{header}\n{rows}"
-        chat_history = chat_history + [{"role": "user", "content": user_message}]
-        chat_history = chat_history + [{"role": "assistant", "content": response}]
-        return chat_history, gr.update(), None
-
+    global cached_df, mcp_results, kde_results, requested_percents, requested_kde_percents
+    chat_history = list(chat_history)
     tool, llm_output = ask_llm(chat_history, user_message)
-    if tool and tool.get("tool") == "home_range" and tool.get("method") == "mcp":
-        percent_list = tool.get("levels", [95]) if "levels" in tool else [tool.get("level", 95)]
-        if isinstance(percent_list, int):
-            percent_list = [percent_list]
-        percent_list = [int(p) for p in percent_list if 1 <= int(p) <= 100]
-    else:
-        percent_list = parse_mcp_levels_from_text(user_message)
-
+    mcp_list, kde_list = [], []
+    method = None
+    if tool and tool.get("tool") == "home_range":
+        method = tool.get("method")
+        levels = tool.get("levels", [95])
+        levels = [int(p) for p in levels if 1 <= int(p) <= 100]
+        if method == "mcp":
+            mcp_list = levels
+        elif method == "kde":
+            kde_list = levels
+    # Manual override from text
+    if "mcp" in user_message.lower():
+        mcp_list = parse_levels_from_text(user_message)
+    if "kde" in user_message.lower():
+        kde_list = parse_levels_from_text(user_message)
+    # Defaults if blank
+    if not mcp_list and not kde_list:
+        mcp_list = [95]
+    # Prepare
     if cached_df is None or "latitude" not in cached_df or "longitude" not in cached_df:
-        chat_history = chat_history + [{"role": "user", "content": user_message}]
-        chat_history = chat_history + [{"role": "assistant", "content": "CSV must be uploaded with 'latitude' and 'longitude' columns."}]
+        chat_history.append({"role": "assistant", "content": "CSV must be uploaded with 'latitude' and 'longitude' columns."})
         return chat_history, gr.update(), None
-
-    add_mcps(cached_df, percent_list)
-    requested_percents.update(percent_list)
-    print("MCP RESULTS:", mcp_results)
-    zip_fp = save_all_mcps_zip()
-
+    # Add home ranges
+    if mcp_list:
+        add_mcps(cached_df, mcp_list)
+        requested_percents.update(mcp_list)
+    if kde_list:
+        add_kdes(cached_df, kde_list)
+        requested_kde_percents.update(kde_list)
+    # Build map
     df = cached_df
     m = folium.Map(location=[df["latitude"].mean(), df["longitude"].mean()], zoom_start=9)
     folium.TileLayer("OpenStreetMap").add_to(m)
@@ -357,13 +252,10 @@ def handle_chat(chat_history, user_message):
         attr="Esri", name="Satellite"
     ).add_to(m)
     points_layer = folium.FeatureGroup(name="Points", show=True)
-    mcps_layers = {}
-    for percent in requested_percents:
-        mcps_layers[percent] = folium.FeatureGroup(name=f"MCP {percent}%", show=True)
     paths_layer = folium.FeatureGroup(name="Tracks", show=True)
     animal_ids = df["animal_id"].unique()
     color_map = {aid: f"#{random.randint(0, 0xFFFFFF):06x}" for aid in animal_ids}
-
+    # Add points/paths
     for animal in animal_ids:
         track = df[df["animal_id"] == animal]
         color = color_map[animal]
@@ -381,26 +273,122 @@ def handle_chat(chat_history, user_message):
                 fill_opacity=0.7,
                 popup=f"{animal}"
             ).add_to(points_layer)
-        if animal in mcp_results:
-            for percent, v in mcp_results[animal].items():
-                folium.Polygon(
-                    locations=[(lat, lon) for lon, lat in np.array(v["polygon"].exterior.coords)],
-                    color=color,
-                    fill=True,
-                    fill_opacity=0.1 + 0.2 * (percent / 100),
-                    popup=f"{animal} MCP {percent}%"
-                ).add_to(mcps_layers[percent])
     points_layer.add_to(m)
     paths_layer.add_to(m)
-    for layer in mcps_layers.values():
-        layer.add_to(m)
+    # Add MCPs
+    for percent in requested_percents:
+        for animal in animal_ids:
+            if animal in mcp_results and percent in mcp_results[animal]:
+                v = mcp_results[animal][percent]
+                folium.Polygon(
+                    locations=[(lat, lon) for lon, lat in np.array(v["polygon"].exterior.coords)],
+                    color=color_map[animal],
+                    fill=True,
+                    fill_opacity=0.15 + 0.15 * (percent / 100),
+                    popup=f"{animal} MCP {percent}%"
+                ).add_to(m)
+    # === KDE RASTER OVERLAYS & CONTOUR ===
+    for percent in requested_kde_percents:
+        for animal in animal_ids:
+            if animal in kde_results and percent in kde_results[animal]:
+                v = kde_results[animal][percent]
+                # RASTER overlay as transparent image
+                with rasterio.open(v["geotiff"]) as src:
+                    arr = src.read(1)
+                    arr_norm = (arr - arr.min()) / (arr.max() - arr.min())
+                    # Map norm to RGBA (use matplotlib colormap)
+                    cmap = plt.get_cmap('plasma')
+                    rgba = (cmap(arr_norm) * 255).astype(np.uint8)
+                    bounds = src.bounds
+                    img = np.dstack([rgba[:, :, 0], rgba[:, :, 1], rgba[:, :, 2], (rgba[:, :, 3]*0.3).astype(np.uint8)])
+                    folium.raster_layers.ImageOverlay(
+                        image=img,
+                        bounds=[[bounds.bottom, bounds.left], [bounds.top, bounds.right]],
+                        opacity=0.3,
+                        name=f"{animal} KDE {percent}%",
+                        interactive=False
+                    ).add_to(m)
+                # Contour as Polygon
+                contour = v["contour"]
+                if contour:
+                    if isinstance(contour, MultiPolygon):
+                        for poly in contour.geoms:
+                            folium.Polygon(
+                                locations=[(lat, lon) for lon, lat in poly.exterior.coords],
+                                color=color_map[animal],
+                                fill=True,
+                                fill_opacity=0.2,
+                                popup=f"{animal} KDE {percent}%"
+                            ).add_to(m)
+                    elif isinstance(contour, Polygon):
+                        folium.Polygon(
+                            locations=[(lat, lon) for lon, lat in contour.exterior.coords],
+                            color=color_map[animal],
+                            fill=True,
+                            fill_opacity=0.2,
+                            popup=f"{animal} KDE {percent}%"
+                        ).add_to(m)
     folium.LayerControl(collapsed=False).add_to(m)
     m = fit_map_to_bounds(m, df)
     map_html = m._repr_html_()
-    chat_history = chat_history + [{"role": "user", "content": user_message}]
-    chat_history = chat_history + [{"role": "assistant", "content": f"MCP home ranges ({', '.join(str(p) for p in percent_list)}%) calculated and displayed for each animal. Download all results below."}]
-    return chat_history, gr.update(value=map_html), zip_fp
+    # Summary message
+    msg = []
+    if mcp_list:
+        msg.append(f"MCP home ranges ({', '.join(str(p) for p in mcp_list)}%) calculated.")
+    if kde_list:
+        msg.append(f"KDE home ranges ({', '.join(str(p) for p in kde_list)}%) calculated (raster & contours).")
+    chat_history.append({"role": "user", "content": user_message})
+    chat_history.append({"role": "assistant", "content": " ".join(msg) + " Download all results below."})
+    return chat_history, gr.update(value=map_html), "spatchat_results.zip"
 
+# ========== ZIP Results ==========
+def save_all_mcps_zip():
+    os.makedirs("outputs", exist_ok=True)
+    # Write MCPs as GeoJSON
+    features = []
+    for animal, percents in mcp_results.items():
+        for percent, v in percents.items():
+            features.append({
+                "type": "Feature",
+                "properties": {
+                    "animal_id": animal,
+                    "percent": percent,
+                    "area_km2": v["area"]
+                },
+                "geometry": mapping(v["polygon"])
+            })
+    geojson = {"type": "FeatureCollection", "features": features}
+    geojson_path = os.path.join("outputs", "mcps_all.geojson")
+    with open(geojson_path, "w") as f:
+        json.dump(geojson, f)
+    # Areas as CSV
+    rows = []
+    for animal, percents in mcp_results.items():
+        for percent, v in percents.items():
+            rows.append((animal, f"MCP-{percent}", v["area"]))
+    for animal, percents in kde_results.items():
+        for percent, v in percents.items():
+            rows.append((animal, f"KDE-{percent}", v["area"]))
+    df = pd.DataFrame(rows, columns=["animal_id", "type", "area_km2"])
+    csv_path = os.path.join("outputs", "home_range_areas.csv")
+    df.to_csv(csv_path, index=False)
+    archive = "spatchat_results.zip"
+    if os.path.exists(archive):
+        os.remove(archive)
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zipf:
+        zipf.write(geojson_path, arcname="mcps_all.geojson")
+        zipf.write(csv_path, arcname="home_range_areas.csv")
+        # Add all KDE outputs (GeoTIFFs + GeoJSONs)
+        for animal, percents in kde_results.items():
+            for percent, v in percents.items():
+                if v.get("geotiff"):
+                    zipf.write(v["geotiff"], arcname=f"kde_{animal}_{percent}.tif")
+                if v.get("geojson"):
+                    zipf.write(v["geojson"], arcname=f"kde_{animal}_{percent}.geojson")
+    print("ZIP written:", archive)
+    return archive
+
+# ========== UI ==========
 with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     gr.Image(
         value="logo_long1.png",
@@ -471,7 +459,17 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
             )
 
     file_input.change(
-        fn=handle_upload_initial,
+        fn=lambda file: (
+            [{"role": "assistant", "content": "File uploaded!"}], 
+            gr.update(choices=[], visible=False),
+            gr.update(choices=[], visible=False),
+            gr.update(visible=False),
+            render_empty_map(),
+            gr.update(choices=[], visible=False),
+            gr.update(choices=[], visible=False),
+            gr.update(visible=False),
+            gr.update(visible=False)
+        ),
         inputs=file_input,
         outputs=[
             chatbot, x_col, y_col, crs_input, map_output,
@@ -479,7 +477,7 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
         ]
     )
     confirm_btn.click(
-        fn=handle_upload_confirm,
+        fn=lambda x_col, y_col, crs_input: render_empty_map(),
         inputs=[x_col, y_col, crs_input],
         outputs=map_output
     )
