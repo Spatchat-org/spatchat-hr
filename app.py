@@ -303,10 +303,14 @@ def kde_home_range(latitudes, longitudes, percent=95, grid_size=200):
     contours = measure.find_contours(mask.astype(float), 0.5)
     polygons = []
     for contour in contours:
-        poly_xy = np.array([[X[int(p[0]), int(p[1])], Y[int(p[0]), int(p[1])]] for p in contour])
+        # Correct mapping of array index to geographic coordinates
+        poly_xy = np.array([
+            [X[int(p[0]), int(p[1])], Y[int(p[0]), int(p[1])]]  # y=row=p[0], x=col=p[1]
+            for p in contour
+        ])
         if len(poly_xy) >= 3:
             poly = Polygon(poly_xy)
-            # Fix invalid polygons by buffering 0 (standard trick)
+            # Fix invalid polygons by buffering 0
             if not poly.is_valid:
                 poly = poly.buffer(0)
             if poly.is_valid and poly.area > 0:
@@ -428,44 +432,57 @@ def handle_chat(chat_history, user_message):
                     fill_opacity=0.15 + 0.15 * (percent / 100),
                     popup=f"{animal} MCP {percent}%"
                 ).add_to(m)
-    # KDE RASTER & CONTOUR
+    # KDE RASTER & CONTOUR - Each with own FeatureGroup
     for percent in requested_kde_percents:
         for animal in animal_ids:
             if animal in kde_results and percent in kde_results[animal]:
                 v = kde_results[animal][percent]
+                # --- KDE Raster Layer ---
+                raster_layer = folium.FeatureGroup(name=f"{animal} KDE {percent}% Raster", show=True)
                 with rasterio.open(v["geotiff"]) as src:
                     arr = src.read(1)
                     arr_norm = (arr - arr.min()) / (arr.max() - arr.min())
                     cmap = plt.get_cmap('plasma')
                     rgba = (cmap(arr_norm) * 255).astype(np.uint8)
                     bounds = src.bounds
-                    img = np.dstack([rgba[:, :, 0], rgba[:, :, 1], rgba[:, :, 2], (rgba[:, :, 3]*0.3).astype(np.uint8)])
-                    folium.raster_layers.ImageOverlay(
-                        image=img,
-                        bounds=[[bounds.bottom, bounds.left], [bounds.top, bounds.right]],
-                        opacity=0.3,
-                        name=f"{animal} KDE {percent}%",
-                        interactive=False
-                    ).add_to(m)
+                    img = np.dstack([
+                        rgba[:, :, 0], rgba[:, :, 1], rgba[:, :, 2], (rgba[:, :, 3]*0.7).astype(np.uint8)
+                    ])
+                    raster_layer.add_child(
+                        folium.raster_layers.ImageOverlay(
+                            image=img,
+                            bounds=[[bounds.bottom, bounds.left], [bounds.top, bounds.right]],
+                            opacity=0.7,  # More visible!
+                            interactive=False
+                        )
+                    )
+                m.add_child(raster_layer)
+                # --- KDE Contour Layer ---
+                contour_layer = folium.FeatureGroup(name=f"{animal} KDE {percent}% Contour", show=True)
                 contour = v["contour"]
                 if contour:
                     if isinstance(contour, MultiPolygon):
                         for poly in contour.geoms:
+                            contour_layer.add_child(
+                                folium.Polygon(
+                                    locations=[(lat, lon) for lon, lat in poly.exterior.coords],
+                                    color=color_map[animal],
+                                    fill=True,
+                                    fill_opacity=0.2,
+                                    popup=f"{animal} KDE {percent}% Contour"
+                                )
+                            )
+                    elif isinstance(contour, Polygon):
+                        contour_layer.add_child(
                             folium.Polygon(
-                                locations=[(lat, lon) for lon, lat in poly.exterior.coords],
+                                locations=[(lat, lon) for lon, lat in contour.exterior.coords],
                                 color=color_map[animal],
                                 fill=True,
                                 fill_opacity=0.2,
-                                popup=f"{animal} KDE {percent}%"
-                            ).add_to(m)
-                    elif isinstance(contour, Polygon):
-                        folium.Polygon(
-                            locations=[(lat, lon) for lon, lat in contour.exterior.coords],
-                            color=color_map[animal],
-                            fill=True,
-                            fill_opacity=0.2,
-                            popup=f"{animal} KDE {percent}%"
-                        ).add_to(m)
+                                popup=f"{animal} KDE {percent}% Contour"
+                            )
+                        )
+                m.add_child(contour_layer)
     folium.LayerControl(collapsed=False).add_to(m)
     m = fit_map_to_bounds(m, df)
     map_html = m._repr_html_()
