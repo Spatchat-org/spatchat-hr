@@ -285,15 +285,25 @@ def add_mcps(df, percent_list):
 
 # ========== KDE Section ==========
 def kde_home_range(latitudes, longitudes, percent=95, grid_size=200):
-    xy = np.vstack([longitudes, latitudes])
+    # Use UTM zone based on centroid, fallback to Web Mercator
+    lon0, lat0 = np.mean(longitudes), np.mean(latitudes)
+    utm_zone = int((lon0 + 180) // 6) + 1
+    epsg_utm = 32600 + utm_zone if lat0 >= 0 else 32700 + utm_zone
+    # Transformer: WGS84 (EPSG:4326) <-> UTM
+    to_utm = Transformer.from_crs("epsg:4326", f"epsg:{epsg_utm}", always_xy=True)
+    to_latlon = Transformer.from_crs(f"epsg:{epsg_utm}", "epsg:4326", always_xy=True)
+    # Project points to UTM
+    x, y = to_utm.transform(longitudes, latitudes)
+    xy = np.vstack([x, y])
     kde = gaussian_kde(xy)
-    xmin, xmax = longitudes.min(), longitudes.max()
-    ymin, ymax = latitudes.min(), latitudes.max()
+    xmin, xmax = x.min(), x.max()
+    ymin, ymax = y.min(), y.max()
     x_grid = np.linspace(xmin, xmax, grid_size)
     y_grid = np.linspace(ymin, ymax, grid_size)
     X, Y = np.meshgrid(x_grid, y_grid)
     positions = np.vstack([X.ravel(), Y.ravel()])
     Z = kde(positions).reshape(X.shape)
+    # Threshold for percent
     Z_flat = Z.flatten()
     idx = np.argsort(Z_flat)[::-1]
     cumsum = np.cumsum(Z_flat[idx])
@@ -303,40 +313,48 @@ def kde_home_range(latitudes, longitudes, percent=95, grid_size=200):
     contours = measure.find_contours(mask.astype(float), 0.5)
     polygons = []
     for contour in contours:
-        # Correct mapping of array index to geographic coordinates
-        poly_xy = np.array([
-            [X[int(p[0]), int(p[1])], Y[int(p[0]), int(p[1])]]  # y=row=p[0], x=col=p[1]
-            for p in contour
-        ])
-        if len(poly_xy) >= 3:
-            poly = Polygon(poly_xy)
-            # Fix invalid polygons by buffering 0
-            if not poly.is_valid:
-                poly = poly.buffer(0)
-            if poly.is_valid and poly.area > 0:
-                polygons.append(poly)
+        # contour in (row, col) indices; map to (x, y) using meshgrid
+        pts = np.array([ [X[int(p[0]), int(p[1])], Y[int(p[0]), int(p[1])]] for p in contour ])
+        # Convert back to lat/lon for folium
+        lons, lats = to_latlon.transform(pts[:,0], pts[:,1])
+        poly = Polygon(zip(lons, lats))
+        if not poly.is_valid:
+            poly = poly.buffer(0)
+        if poly.is_valid and poly.area > 0:
+            polygons.append(poly)
     if not polygons:
         return None, None, None, None, None, None, None
     from shapely.ops import unary_union
     mpoly = unary_union(polygons)
-    transformer = Transformer.from_crs("epsg:4326", "epsg:3857", always_xy=True)
-    coords_proj = [transformer.transform(*pt) for pt in np.vstack([p.exterior.coords for p in polygons if isinstance(p, Polygon)])]
-    poly_proj = Polygon(coords_proj)
+    # Area: Use projected meters (not lat/lon)
+    all_proj_coords = []
+    for poly in polygons:
+        # Re-project polygon to UTM for area calculation
+        lon_pts, lat_pts = poly.exterior.coords.xy
+        x_proj, y_proj = to_utm.transform(lon_pts, lat_pts)
+        all_proj_coords.append(np.column_stack([x_proj, y_proj]))
+    poly_proj = Polygon(np.vstack(all_proj_coords))
     area_km2 = poly_proj.area / 1e6
+    # Save raster: convert grid centerpoints to lat/lon for each pixel (corners not needed for visualization, use bounds for now)
     tiff_fp = tempfile.mktemp(suffix=f"_kde_{percent}.tif", dir="outputs")
+    # Inverse-transform the four corners for raster bounds
+    lons_west, lats_south = to_latlon.transform(xmin, ymin)
+    lons_east, lats_north = to_latlon.transform(xmax, ymax)
     with rasterio.open(
         tiff_fp, "w",
         driver="GTiff",
         height=Z.shape[0], width=Z.shape[1],
         count=1, dtype=Z.dtype,
         crs="EPSG:4326",
-        transform=from_origin(xmin, ymax, (xmax-xmin)/grid_size, (ymax-ymin)/grid_size)
+        transform=from_origin(lons_west, lats_north,
+                              (lons_east-lons_west)/grid_size,
+                              (lats_north-lats_south)/grid_size)
     ) as dst:
         dst.write(Z, 1)
     geojson_fp = tempfile.mktemp(suffix=f"_kde_{percent}.geojson", dir="outputs")
     with open(geojson_fp, "w") as f:
         json.dump(mapping(mpoly), f)
-    return mpoly, area_km2, tiff_fp, geojson_fp, Z, x_grid, y_grid
+    return mpoly, area_km2, tiff_fp, geojson_fp, Z, None, None
 
 def add_kdes(df, percent_list):
     global kde_results
