@@ -285,16 +285,17 @@ def add_mcps(df, percent_list):
 
 # ========== KDE Section ==========
 def kde_home_range(latitudes, longitudes, percent=95, grid_size=200):
-    # Use UTM zone based on centroid, fallback to Web Mercator
+    # === 1. Choose UTM zone based on mean location ===
     lon0, lat0 = np.mean(longitudes), np.mean(latitudes)
     utm_zone = int((lon0 + 180) // 6) + 1
     epsg_utm = 32600 + utm_zone if lat0 >= 0 else 32700 + utm_zone
-    # Transformer: WGS84 (EPSG:4326) <-> UTM
+    # Project points to UTM
     to_utm = Transformer.from_crs("epsg:4326", f"epsg:{epsg_utm}", always_xy=True)
     to_latlon = Transformer.from_crs(f"epsg:{epsg_utm}", "epsg:4326", always_xy=True)
-    # Project points to UTM
     x, y = to_utm.transform(longitudes, latitudes)
     xy = np.vstack([x, y])
+
+    # === 2. KDE in UTM ===
     kde = gaussian_kde(xy)
     xmin, xmax = x.min(), x.max()
     ymin, ymax = y.min(), y.max()
@@ -303,58 +304,73 @@ def kde_home_range(latitudes, longitudes, percent=95, grid_size=200):
     X, Y = np.meshgrid(x_grid, y_grid)
     positions = np.vstack([X.ravel(), Y.ravel()])
     Z = kde(positions).reshape(X.shape)
-    # Threshold for percent
+
+    # === 3. Find threshold for the requested percentile contour ===
     Z_flat = Z.flatten()
     idx = np.argsort(Z_flat)[::-1]
     cumsum = np.cumsum(Z_flat[idx])
     cumsum /= cumsum[-1]
     threshold = Z_flat[idx][np.searchsorted(cumsum, percent / 100.0)]
     mask = Z >= threshold
+
+    # === 4. Extract contour(s) in UTM ===
     contours = measure.find_contours(mask.astype(float), 0.5)
     polygons = []
     for contour in contours:
-        # contour in (row, col) indices; map to (x, y) using meshgrid
-        pts = np.array([ [X[int(p[0]), int(p[1])], Y[int(p[0]), int(p[1])]] for p in contour ])
-        # Convert back to lat/lon for folium
-        lons, lats = to_latlon.transform(pts[:,0], pts[:,1])
-        poly = Polygon(zip(lons, lats))
-        if not poly.is_valid:
-            poly = poly.buffer(0)
+        px, py = contour[:, 1], contour[:, 0]
+        utm_xs = np.interp(px, np.arange(grid_size), x_grid)
+        utm_ys = np.interp(py, np.arange(grid_size), y_grid)
+        poly = Polygon(zip(utm_xs, utm_ys))
+        poly = poly.buffer(0)
         if poly.is_valid and poly.area > 0:
             polygons.append(poly)
     if not polygons:
         return None, None, None, None, None, None, None
     from shapely.ops import unary_union
-    mpoly = unary_union(polygons)
-    # Area: Use projected meters (not lat/lon)
-    all_proj_coords = []
-    for poly in polygons:
-        # Re-project polygon to UTM for area calculation
-        lon_pts, lat_pts = poly.exterior.coords.xy
-        x_proj, y_proj = to_utm.transform(lon_pts, lat_pts)
-        all_proj_coords.append(np.column_stack([x_proj, y_proj]))
-    poly_proj = Polygon(np.vstack(all_proj_coords))
-    area_km2 = poly_proj.area / 1e6
-    # Save raster: convert grid centerpoints to lat/lon for each pixel (corners not needed for visualization, use bounds for now)
+    mpoly_utm = unary_union(polygons)
+
+    # === 5. Transform contour(s) back to lat/lon for mapping/export ===
+    def utm_poly_to_latlon(poly):
+        if poly.is_empty:
+            return None
+        if isinstance(poly, Polygon):
+            ext_lon, ext_lat = to_latlon.transform(*poly.exterior.xy)
+            interiors = [to_latlon.transform(*interior.xy) for interior in poly.interiors]
+            return Polygon(list(zip(ext_lon, ext_lat)),
+                           [list(zip(int_lon, int_lat)) for int_lon, int_lat in interiors])
+        elif isinstance(poly, MultiPolygon):
+            return MultiPolygon([utm_poly_to_latlon(p) for p in poly.geoms if not p.is_empty])
+        else:
+            return None
+
+    mpoly_latlon = utm_poly_to_latlon(mpoly_utm)
+
+    # === 6. Area in km2 (in UTM units) ===
+    area_km2 = mpoly_utm.area / 1e6
+
+    # === 7. Save raster: Convert UTM grid to WGS84 bounds ===
     tiff_fp = tempfile.mktemp(suffix=f"_kde_{percent}.tif", dir="outputs")
-    # Inverse-transform the four corners for raster bounds
-    lons_west, lats_south = to_latlon.transform(xmin, ymin)
-    lons_east, lats_north = to_latlon.transform(xmax, ymax)
+    # Get WGS84 for SW and NE corners
+    lon_sw, lat_sw = to_latlon.transform(xmin, ymin)
+    lon_ne, lat_ne = to_latlon.transform(xmax, ymax)
     with rasterio.open(
         tiff_fp, "w",
         driver="GTiff",
         height=Z.shape[0], width=Z.shape[1],
         count=1, dtype=Z.dtype,
         crs="EPSG:4326",
-        transform=from_origin(lons_west, lats_north,
-                              (lons_east-lons_west)/grid_size,
-                              (lats_north-lats_south)/grid_size)
+        transform=from_origin(lon_sw, lat_ne,
+                              (lon_ne - lon_sw) / grid_size,
+                              (lat_ne - lat_sw) / grid_size)
     ) as dst:
         dst.write(Z, 1)
+
+    # === 8. Export contour as geojson ===
     geojson_fp = tempfile.mktemp(suffix=f"_kde_{percent}.geojson", dir="outputs")
     with open(geojson_fp, "w") as f:
-        json.dump(mapping(mpoly), f)
-    return mpoly, area_km2, tiff_fp, geojson_fp, Z, None, None
+        json.dump(mapping(mpoly_latlon), f)
+
+    return mpoly_latlon, area_km2, tiff_fp, geojson_fp, Z, None, None
 
 def add_kdes(df, percent_list):
     global kde_results
