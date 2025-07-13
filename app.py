@@ -22,6 +22,7 @@ import tempfile
 
 print("Starting SpatChat (multi-MCP/KDE, robust download version)")
 
+# ====== SESSION STATE (NEW!) ======
 mcp_results = {}
 kde_results = {}
 requested_percents = set()
@@ -30,11 +31,13 @@ cached_df = None
 cached_headers = []
 
 def clear_all_results():
-    global mcp_results, kde_results, requested_percents, requested_kde_percents
+    global mcp_results, kde_results, requested_percents, requested_kde_percents, cached_df, cached_headers
     mcp_results = {}
     kde_results = {}
     requested_percents = set()
     requested_kde_percents = set()
+    cached_df = None
+    cached_headers = []
     # Clean outputs folder and reset everything for new session
     if os.path.exists("outputs"):
         shutil.rmtree("outputs")
@@ -406,6 +409,11 @@ def add_kdes(df, percent_list):
 def handle_chat(chat_history, user_message):
     global cached_df, mcp_results, kde_results, requested_percents, requested_kde_percents
     chat_history = list(chat_history)
+    # Reset if asked
+    if re.search(r"\b(start over|restart|clear|reset)\b", user_message, re.I):
+        clear_all_results()
+        chat_history = [{"role": "assistant", "content": "All cleared! Please upload a new CSV to begin."}]
+        return chat_history, gr.update(value=render_empty_map()), gr.update(visible=False)
     tool, llm_output = ask_llm(chat_history, user_message)
     mcp_list, kde_list = [], []
     method = None
@@ -599,6 +607,9 @@ def save_all_mcps_zip():
 
 # ========== UI ==========
 with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
+    # ------ SESSION STATE ------
+    session_state = gr.State({"initialized": False})  # <<<<<<< NEW
+
     gr.Image(
         value="logo_long1.png",
         show_label=False,
@@ -687,5 +698,14 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
         outputs=[chatbot, map_output, download_btn]
     )
     user_input.submit(lambda *args: "", inputs=None, outputs=user_input)
+
+# ------ SESSION RESET LOGIC ------
+def session_init(state):
+    if not state.get("initialized", False):
+        clear_all_results()
+        state["initialized"] = True
+    return state
+
+demo.load(session_init, inputs=[session_state], outputs=[session_state])
 
 demo.launch(ssr_mode=False)
