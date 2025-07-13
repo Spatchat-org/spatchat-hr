@@ -559,51 +559,53 @@ def handle_chat(chat_history, user_message):
 
 # ========== ZIP Results ==========
 def save_all_mcps_zip():
-    import os, json, zipfile, pandas as pd
-    from shapely.geometry import mapping
-
-    # 1) ensure outputs exists
     os.makedirs("outputs", exist_ok=True)
 
-    # 2) write the GeoJSON if any MCPs exist
-    geojson_path = None
-    if any(mcp_results.values()):
-        features = []
-        for animal, percents in mcp_results.items():
-            for pct, v in percents.items():
-                features.append({
-                    "type": "Feature",
-                    "properties": {"animal_id": animal, "percent": pct, "area_km2": v["area"]},
-                    "geometry": mapping(v["polygon"])
-                })
-        geojson_path = os.path.join("outputs", "mcps_all.geojson")
-        with open(geojson_path, "w") as f:
-            json.dump({"type":"FeatureCollection", "features":features}, f)
+    # write GeoJSON if any MCPs exist
+    features = []
+    for animal, percents in mcp_results.items():
+        for percent, v in percents.items():
+            features.append({
+                "type": "Feature",
+                "properties": {
+                    "animal_id": animal,
+                    "percent": percent,
+                    "area_km2": v["area"]
+                },
+                "geometry": mapping(v["polygon"])
+            })
+    if features:
+        geojson = {"type": "FeatureCollection", "features": features}
+        with open("outputs/mcps_all.geojson", "w") as f:
+            json.dump(geojson, f)
 
-    # 3) write the summary CSV if any areas exist
-    csv_path = None
+    # write CSV of areas (MCP + KDE)
     rows = []
     for animal, percents in mcp_results.items():
-        for pct, v in percents.items():
-            rows.append((animal, f"MCP-{pct}", v["area"]))
+        for percent, v in percents.items():
+            rows.append((animal, f"MCP-{percent}", v["area"]))
     for animal, percents in kde_results.items():
-        for pct, v in percents.items():
-            rows.append((animal, f"KDE-{pct}", v["area"]))
+        for percent, v in percents.items():
+            rows.append((animal, f"KDE-{percent}", v["area"]))
     if rows:
-        csv_path = os.path.join("outputs", "home_range_areas.csv")
-        pd.DataFrame(rows, columns=["animal_id","type","area_km2"]).to_csv(csv_path, index=False)
+        df = pd.DataFrame(rows, columns=["animal_id", "type", "area_km2"])
+        df.to_csv("outputs/home_range_areas.csv", index=False)
 
-    # 4) build the zip in the repo root
-    archive = "spatchat_results.zip"
+    # bundle everything under outputs/ into a single ZIP
+    archive = "outputs/spatchat_results.zip"
     if os.path.exists(archive):
         os.remove(archive)
-    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
-        for p in (geojson_path, csv_path):
-            if p and os.path.isfile(p):
-                zf.write(p, arcname=os.path.basename(p))
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zipf:
+        for root, _, files in os.walk("outputs"):
+            for file in files:
+                if file.endswith(".zip"):
+                    continue
+                full_path = os.path.join(root, file)
+                rel_path = os.path.relpath(full_path, "outputs")
+                zipf.write(full_path, arcname=rel_path)
 
-    # 5) return a (file_path, download_name) tuple
-    return archive, os.path.basename(archive)
+    return archive
+
 
 # ========== UI ==========
 with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
@@ -669,8 +671,12 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
             confirm_btn = gr.Button("Confirm Coordinate Settings", visible=False)
         with gr.Column(scale=3):
             map_output = gr.HTML(label="Map Preview", value=render_empty_map(), show_label=False)
-            download_btn = gr.DownloadButton("📥 Download Results", save_all_mcps_zip, visible=False)
-
+            download_btn = gr.DownloadButton(
+                "📥 Download Results",
+                save_all_mcps_zip,
+                label="Download Results",
+                visible=False  # only shown after a calculation
+            )
             
     # ——— wiring callbacks ———
     file_input.change(
