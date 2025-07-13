@@ -564,16 +564,15 @@ def handle_chat(chat_history, user_message):
 
 # ========== ZIP Results ==========
 def save_all_mcps_zip():
-    # 1) ensure outputs folder exists
     outputs_dir = "outputs"
     os.makedirs(outputs_dir, exist_ok=True)
 
-    # 2) remove any stale ZIP so we start fresh
+    # overwrite the same archive name
     archive = os.path.join(outputs_dir, "spatchat_results.zip")
     if os.path.exists(archive):
         os.remove(archive)
 
-    # 3) write GeoJSON of MCPs (if any)
+    # 1) write MCP GeoJSON if present
     features = []
     for animal, percs in mcp_results.items():
         for pct, v in percs.items():
@@ -587,11 +586,10 @@ def save_all_mcps_zip():
                 "geometry": mapping(v["polygon"])
             })
     if features:
-        geojson = {"type": "FeatureCollection", "features": features}
         with open(os.path.join(outputs_dir, "mcps_all.geojson"), "w") as f:
-            json.dump(geojson, f)
+            json.dump({"type":"FeatureCollection","features":features}, f)
 
-    # 4) write CSV of areas (MCP + KDE)
+    # 2) write summary CSV (MCP + KDE)
     rows = []
     for animal, percs in mcp_results.items():
         for pct, v in percs.items():
@@ -600,18 +598,18 @@ def save_all_mcps_zip():
         for pct, v in percs.items():
             rows.append((animal, f"KDE-{pct}", v["area"]))
     if rows:
-        df = pd.DataFrame(rows, columns=["animal_id", "type", "area_km2"])
-        df.to_csv(os.path.join(outputs_dir, "home_range_areas.csv"), index=False)
+        pd.DataFrame(rows, columns=["animal_id","type","area_km2"])\
+          .to_csv(os.path.join(outputs_dir, "home_range_areas.csv"), index=False)
 
-    # 5) zip everything under outputs/, skipping any .zip files
+    # 3) zip everything under outputs/, skipping any .zip files
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
         for root, _, files in os.walk(outputs_dir):
             for fname in files:
                 if fname.endswith(".zip"):
                     continue
-                full = os.path.join(root, fname)
-                rel = os.path.relpath(full, outputs_dir)
-                zf.write(full, arcname=rel)
+                src = os.path.join(root, fname)
+                arcname = os.path.relpath(src, outputs_dir)
+                zf.write(src, arcname=arcname)
 
     return archive
 
@@ -681,11 +679,10 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
             map_output = gr.HTML(label="Map Preview", value=render_empty_map(), show_label=False)
             # DownloadButton now calls save_all_mcps_zip and uses the returned tuple
             download_btn = gr.DownloadButton(
-                fn=save_all_mcps_zip,     # will be run when clicked
-                label="📥 Download Results",
-                visible=False             # toggle this on in handle_chat
+                "📥 Download Results",    # button text
+                save_all_mcps_zip,        # function to call on click
+                visible=False             # show it only after computation
             )
-
     file_input.change(
         fn=handle_upload_initial,
         inputs=file_input,
