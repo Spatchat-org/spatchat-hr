@@ -606,7 +606,6 @@ def save_all_mcps_zip():
     return archive
 
 # ========== UI ==========
-# ========== UI ==========
 with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     gr.Image(
         value="logo_long1.png",
@@ -673,10 +672,9 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
             download_btn = gr.DownloadButton(
                 "📥 Download Results",
                 save_all_mcps_zip,
-                label="Download Results",
-                visible=False  # only shown after a calculation
+                visible=False
             )
-
+            
     # ——— wiring callbacks ———
     file_input.change(
         fn=handle_upload_initial,
