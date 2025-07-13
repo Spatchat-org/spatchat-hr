@@ -435,6 +435,8 @@ def handle_chat(chat_history, user_message):
         add_kdes(cached_df, kde_list)
         requested_kde_percents.update(kde_list)
         results_exist = True
+    if results_exist:
+        save_all_mcps_zip()
     df = cached_df
     m = folium.Map(location=[df["latitude"].mean(), df["longitude"].mean()], zoom_start=9)
     folium.TileLayer("OpenStreetMap").add_to(m)
