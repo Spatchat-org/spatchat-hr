@@ -184,7 +184,6 @@ def add_kdes(df, pct_list):
 # ========== ZIP CREATOR ==========
 def save_all_mcps_zip():
     os.makedirs("outputs", exist_ok=True)
-    # MCP GeoJSON
     feats=[]
     for aid, percs in mcp_results.items():
         for pct,v in percs.items():
@@ -196,7 +195,6 @@ def save_all_mcps_zip():
     if feats:
         with open("outputs/mcps_all.geojson","w") as f:
             json.dump({"type":"FeatureCollection","features":feats},f)
-    # Summary CSV
     rows=[]
     for aid, percs in mcp_results.items():
         for pct,v in percs.items():
@@ -205,9 +203,7 @@ def save_all_mcps_zip():
         for pct,v in percs.items():
             rows.append((aid,f"KDE-{pct}",v["area"]))
     if rows:
-        pd.DataFrame(rows,columns=["animal_id","type","area_km2"]) \
-          .to_csv("outputs/home_range_areas.csv",index=False)
-    # Build zip
+        pd.DataFrame(rows,columns=["animal_id","type","area_km2"]).to_csv("outputs/home_range_areas.csv",index=False)
     archive="outputs/spatchat_results.zip"
     if os.path.exists(archive): os.remove(archive)
     with zipfile.ZipFile(archive,"w",zipfile.ZIP_DEFLATED) as zf:
@@ -232,7 +228,6 @@ def handle_upload_initial(file):
         return [{"role":"assistant","content":"❌ Failed to read CSV."}], "", render_empty_map()
     cached_df=df
     cached_headers=list(df.columns)
-    # check for lat/lon
     cols_lower=[c.lower() for c in df.columns]
     if "latitude" in cols_lower and "longitude" in cols_lower:
         return [{"role":"assistant","content":"✅ CSV uploaded. Ready to compute home ranges."}], "", render_empty_map()
@@ -242,11 +237,9 @@ def handle_upload_initial(file):
 def handle_chat(history, user_msg):
     global cached_df
     chat_history=list(history)
-    # reset?
     if re.search(r"\b(start over|restart|clear|reset)\b", user_msg, re.I):
         clear_all_results()
         return [{"role":"assistant","content":"🗑️ All cleared! Upload a new CSV to begin."}], gr.update(value=render_empty_map()), ""
-    # parse intent
     tool,_ = ask_llm(chat_history, user_msg)
     mcp_list,kde_list=[],[]
     if tool and tool.get("tool")=="home_range":
@@ -258,12 +251,10 @@ def handle_chat(history, user_msg):
     if cached_df is None:
         chat_history.append({"role":"assistant","content":"⚠️ Please upload a CSV first."})
         return chat_history, gr.update(value=render_empty_map()), ""
-    # compute
     if mcp_list:
         add_mcps(cached_df, mcp_list); requested_percents.update(mcp_list)
     if kde_list:
         add_kdes(cached_df, kde_list); requested_kde_percents.update(kde_list)
-    # rebuild map
     df=cached_df
     m=folium.Map(location=[df.latitude.mean(),df.longitude.mean()],zoom_start=9,control_scale=True)
     folium.TileLayer("OpenStreetMap").add_to(m)
@@ -301,10 +292,8 @@ def handle_chat(history, user_msg):
     m=fit_map_to_bounds(m,df)
     map_html=m._repr_html_()
 
-    # build and return ZIP
     zip_fp=save_all_mcps_zip()
 
-    # assistant message
     msgs=[]
     if mcp_list: msgs.append(f"MCPs ({','.join(map(str,mcp_list))}%) calculated.")
     if kde_list: msgs.append(f"KDEs ({','.join(map(str,kde_list))}%) calculated.")
@@ -318,18 +307,23 @@ def handle_chat(history, user_msg):
 with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     gr.Image("logo_long1.png",show_label=False,type="filepath",elem_id="logo-img")
     gr.Markdown("## 🏠 SpatChat: Home Range Analysis")
+
     with gr.Row():
         with gr.Column(scale=2):
-            chatbot   = gr.Chatbot(value=[{"role":"assistant","content":"Welcome! Upload a CSV of coordinates to begin."}])
-            user_input= gr.Textbox(placeholder="Type commands…")
-            file_input= gr.File(file_types=[".csv"])
+            chatbot = gr.Chatbot(
+                type="messages",
+                value=[{"role":"assistant","content":"Welcome! Upload a CSV of coordinates to begin."}]
+            )
+            user_input = gr.Textbox(placeholder="Type commands…")
+            file_input = gr.File(file_types=[".csv"])
         with gr.Column(scale=3):
-            map_out   = gr.HTML(render_empty_map())
+            map_out = gr.HTML(render_empty_map())
             download_btn = gr.DownloadButton(
                 "📥 Download Results",
                 save_all_mcps_zip,
                 label="Download Results"
             )
+
     file_input.change(
         fn=handle_upload_initial,
         inputs=[file_input],
