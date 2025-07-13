@@ -559,55 +559,51 @@ def handle_chat(chat_history, user_message):
 
 # ========== ZIP Results ==========
 def save_all_mcps_zip():
-    # make sure outputs exists
+    import os, json, zipfile, pandas as pd
+    from shapely.geometry import mapping
+
+    # 1) ensure outputs exists
     os.makedirs("outputs", exist_ok=True)
 
-    # 1) Write the combined GeoJSON if any MCPs exist
+    # 2) write the GeoJSON if any MCPs exist
+    geojson_path = None
     if any(mcp_results.values()):
         features = []
         for animal, percents in mcp_results.items():
-            for percent, v in percents.items():
+            for pct, v in percents.items():
                 features.append({
                     "type": "Feature",
-                    "properties": {
-                        "animal_id": animal,
-                        "percent": percent,
-                        "area_km2": v["area"]
-                    },
+                    "properties": {"animal_id": animal, "percent": pct, "area_km2": v["area"]},
                     "geometry": mapping(v["polygon"])
                 })
-        geojson = {"type": "FeatureCollection", "features": features}
         geojson_path = os.path.join("outputs", "mcps_all.geojson")
         with open(geojson_path, "w") as f:
-            json.dump(geojson, f)
-    else:
-        geojson_path = None
+            json.dump({"type":"FeatureCollection", "features":features}, f)
 
-    # 2) Write the summary CSV if there are any areas (MCP or KDE)
+    # 3) write the summary CSV if any areas exist
+    csv_path = None
     rows = []
     for animal, percents in mcp_results.items():
-        for percent, v in percents.items():
-            rows.append((animal, f"MCP-{percent}", v["area"]))
+        for pct, v in percents.items():
+            rows.append((animal, f"MCP-{pct}", v["area"]))
     for animal, percents in kde_results.items():
-        for percent, v in percents.items():
-            rows.append((animal, f"KDE-{percent}", v["area"]))
+        for pct, v in percents.items():
+            rows.append((animal, f"KDE-{pct}", v["area"]))
     if rows:
         csv_path = os.path.join("outputs", "home_range_areas.csv")
-        pd.DataFrame(rows, columns=["animal_id", "type", "area_km2"]).to_csv(csv_path, index=False)
-    else:
-        csv_path = None
+        pd.DataFrame(rows, columns=["animal_id","type","area_km2"]).to_csv(csv_path, index=False)
 
-    # 3) Build the ZIP at the repo root (so Gradio picks it up cleanly)
+    # 4) build the zip in the repo root
     archive = "spatchat_results.zip"
     if os.path.exists(archive):
         os.remove(archive)
-    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zipf:
-        if geojson_path:
-            zipf.write(geojson_path, arcname="mcps_all.geojson")
-        if csv_path:
-            zipf.write(csv_path, arcname="home_range_areas.csv")
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
+        for p in (geojson_path, csv_path):
+            if p and os.path.isfile(p):
+                zf.write(p, arcname=os.path.basename(p))
 
-    return archive
+    # 5) return a (file_path, download_name) tuple
+    return archive, os.path.basename(archive)
 
 # ========== UI ==========
 with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
