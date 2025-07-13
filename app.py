@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 from scipy.spatial import ConvexHull
 from shapely.geometry import Polygon, mapping, MultiPolygon
 import zipfile
+import time
 import re
 import rasterio
 from rasterio.transform import from_origin
@@ -35,10 +36,22 @@ def clear_all_results():
     kde_results = {}
     requested_percents = set()
     requested_kde_percents = set()
-    # Clean outputs folder and reset everything for new session
+    # Clean outputs folder for new session
     if os.path.exists("outputs"):
-        shutil.rmtree("outputs")
+        try:
+            shutil.rmtree("outputs")
+        except Exception as e:
+            print(f"Warning: Failed to remove outputs directory: {e}")
+            # Attempt to remove files inside if rmtree fails
+            for fname in os.listdir("outputs"):
+                file_path = os.path.join("outputs", fname)
+                try:
+                    os.remove(file_path)
+                except Exception as e:
+                    print(f"Could not remove file {file_path}: {e}")
     os.makedirs("outputs", exist_ok=True)
+
+
 
 # ========== LLM SETUP (Together API) ==========
 load_dotenv()
@@ -435,8 +448,6 @@ def handle_chat(chat_history, user_message):
         add_kdes(cached_df, kde_list)
         requested_kde_percents.update(kde_list)
         results_exist = True
-    if results_exist:
-        save_all_mcps_zip()
     df = cached_df
     m = folium.Map(location=[df["latitude"].mean(), df["longitude"].mean()], zoom_start=9)
     folium.TileLayer("OpenStreetMap").add_to(m)
@@ -556,7 +567,10 @@ def save_all_mcps_zip():
     os.makedirs("outputs", exist_ok=True)
     features = []
     rows = []
-
+    # Remove any existing zip files to avoid mixing results between sessions
+    for fname in os.listdir("outputs"):
+        if fname.endswith(".zip"):
+            os.remove(os.path.join("outputs", fname))
     geojson_path = None
     if any(mcp_results.values()):
         for animal, percents in mcp_results.items():
@@ -585,9 +599,9 @@ def save_all_mcps_zip():
         csv_path = os.path.join("outputs", "home_range_areas.csv")
         df.to_csv(csv_path, index=False)
 
-    archive = "outputs/spatchat_results.zip"
-    if os.path.exists(archive):
-        os.remove(archive)
+    # Use a unique filename for each zip (using current timestamp)
+    archive = os.path.join("outputs", f"spatchat_results_{int(time.time())}.zip")
+        
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zipf:
         for root, _, files in os.walk("outputs"):
             for file in files:
@@ -667,7 +681,8 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
                 "📥 Download Results",
                 save_all_mcps_zip,
                 label="Download Results",
-                visible=False # initially hidden
+                file_name="spatchat_results.zip",  # user will see this name
+                visible=False  # hidden until results exist
             )
 
     file_input.change(
