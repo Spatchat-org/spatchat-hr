@@ -35,17 +35,9 @@ def clear_all_results():
     kde_results = {}
     requested_percents = set()
     requested_kde_percents = set()
-    # Clean outputs folder
+    # Clean outputs folder and reset everything for new session
     if os.path.exists("outputs"):
-        for f in os.listdir("outputs"):
-            file_path = os.path.join("outputs", f)
-            try:
-                if os.path.isfile(file_path) or os.path.islink(file_path):
-                    os.remove(file_path)
-                elif os.path.isdir(file_path):
-                    shutil.rmtree(file_path)
-            except Exception:
-                pass
+        shutil.rmtree("outputs")
     os.makedirs("outputs", exist_ok=True)
 
 # ========== LLM SETUP (Together API) ==========
@@ -280,7 +272,7 @@ def mcp_polygon(latitudes, longitudes, percent=95):
     return hull_points
 
 def add_mcps(df, percent_list):
-    global mcp_results, RESULTS_READY
+    global mcp_results
     for percent in percent_list:
         for animal in df["animal_id"].unique():
             if animal not in mcp_results:
@@ -295,11 +287,9 @@ def add_mcps(df, percent_list):
                     poly_proj = Polygon(coords_proj)
                     area_km2 = poly_proj.area / 1e6
                     mcp_results[animal][percent] = {"polygon": poly, "area": area_km2}
-                    RESULTS_READY = True
 
 # ========== KDE Section ==========
 def kde_home_range(latitudes, longitudes, percent=95, grid_size=200):
-    # 1. Project to UTM zone based on mean location
     lon0, lat0 = np.mean(longitudes), np.mean(latitudes)
     utm_zone = int((lon0 + 180) // 6) + 1
     epsg_utm = 32600 + utm_zone if lat0 >= 0 else 32700 + utm_zone
@@ -308,17 +298,15 @@ def kde_home_range(latitudes, longitudes, percent=95, grid_size=200):
     x, y = to_utm.transform(longitudes, latitudes)
     xy = np.vstack([x, y]).T
 
-    # 2. Reference bandwidth (Silverman’s rule of thumb)
     n = xy.shape[0]
     if n > 1:
         stds = np.std(xy, axis=0, ddof=1)
         h = np.power(4 / (3 * n), 1 / 5) * np.mean(stds)
-        if h < 1:  # Fallback
+        if h < 1:
             h = 30.0
     else:
         h = 30.0
 
-    # 3. Grid definition in projected coordinates
     margin = 3 * h
     xmin, xmax = x.min() - margin, x.max() + margin
     ymin, ymax = y.min() - margin, y.max() + margin
@@ -327,30 +315,24 @@ def kde_home_range(latitudes, longitudes, percent=95, grid_size=200):
     X, Y = np.meshgrid(x_grid, y_grid)
     grid_points = np.vstack([X.ravel(), Y.ravel()]).T
 
-    # 4. KDE estimation in UTM meters
     kde = KernelDensity(bandwidth=h, kernel="gaussian")
     kde.fit(xy)
     Z = np.exp(kde.score_samples(grid_points)).reshape(X.shape)
 
-    # 5. Normalize UD so cell sum = 1
     cell_area = (x_grid[1] - x_grid[0]) * (y_grid[1] - y_grid[0])
     Z /= (Z.sum() * cell_area)
 
-    # 6. Find threshold for requested percentile
     Z_flat = Z.flatten()
     idx_desc = np.argsort(Z_flat)[::-1]
     cumsum = np.cumsum(Z_flat[idx_desc] * cell_area)
     threshold = Z_flat[idx_desc][np.searchsorted(cumsum, percent / 100.0)]
     mask = Z >= threshold
 
-    # Mask outside top-X%
     Z_masked = np.where(mask, Z, 0)
-    # Re-normalize so UD in the mask sums to 1 (optional, but often preferred)
     total_prob = Z_masked.sum() * cell_area
     if total_prob > 0:
         Z_masked /= total_prob
 
-    # 7. Extract contour(s) at the threshold in UTM meters
     contours = measure.find_contours(mask.astype(float), 0.5)
     polygons = []
     for contour in contours:
@@ -365,7 +347,6 @@ def kde_home_range(latitudes, longitudes, percent=95, grid_size=200):
     from shapely.ops import unary_union
     mpoly_utm = unary_union(polygons)
 
-    # 8. Transform contour(s) back to lat/lon for mapping/export
     def utm_poly_to_latlon(poly):
         if poly.is_empty:
             return None
@@ -380,11 +361,8 @@ def kde_home_range(latitudes, longitudes, percent=95, grid_size=200):
             return None
 
     mpoly_latlon = utm_poly_to_latlon(mpoly_utm)
-
-    # 9. Area in km2 (in UTM units)
     area_km2 = mpoly_utm.area / 1e6
 
-    # 10. Save truncated raster: only top X% UD (mask all else to zero, re-normalized)
     tiff_fp = tempfile.mktemp(suffix=f"_kde_{percent}.tif", dir="outputs")
     lon_sw, lat_sw = to_latlon.transform(xmin, ymin)
     lon_ne, lat_ne = to_latlon.transform(xmax, ymax)
@@ -399,8 +377,7 @@ def kde_home_range(latitudes, longitudes, percent=95, grid_size=200):
                               (lat_ne - lat_sw) / grid_size)
     ) as dst:
         dst.write(np.flipud(Z_masked), 1)
-        
-    # 11. Export contour as geojson
+
     geojson_fp = tempfile.mktemp(suffix=f"_kde_{percent}.geojson", dir="outputs")
     with open(geojson_fp, "w") as f:
         json.dump(mapping(mpoly_latlon), f)
@@ -408,7 +385,7 @@ def kde_home_range(latitudes, longitudes, percent=95, grid_size=200):
     return mpoly_latlon, area_km2, tiff_fp, geojson_fp, Z_masked, None, None
 
 def add_kdes(df, percent_list):
-    global kde_results, RESULTS_READY
+    global kde_results
     os.makedirs("outputs", exist_ok=True)
     for percent in percent_list:
         for animal in df["animal_id"].unique():
@@ -424,7 +401,6 @@ def add_kdes(df, percent_list):
                         "contour": mpoly, "area": area_km2,
                         "geotiff": tiff_fp, "geojson": geojson_fp
                     }
-                    RESULTS_READY = True
 
 # ========== Main Handlers ==========
 def handle_chat(chat_history, user_message):
@@ -510,7 +486,7 @@ def handle_chat(chat_history, user_message):
                     )
                 )
                 m.add_child(mcp_layer)
-    # KDE RASTER & CONTOUR - Each with own FeatureGroup
+    # KDE RASTER & CONTOUR
     for percent in requested_kde_percents:
         for animal in animal_ids:
             if animal in kde_results and percent in kde_results[animal]:
@@ -571,7 +547,6 @@ def handle_chat(chat_history, user_message):
         msg.append(f"KDE home ranges ({', '.join(str(p) for p in kde_list)}%) calculated (raster & contours).")
     chat_history.append({"role": "user", "content": user_message})
     chat_history.append({"role": "assistant", "content": " ".join(msg) + " Download all results below."})
-    # Only show download if there are results
     return chat_history, gr.update(value=m._repr_html_()), gr.update(visible=results_exist)
 
 # ========== ZIP Results ==========
@@ -580,7 +555,6 @@ def save_all_mcps_zip():
     features = []
     rows = []
 
-    # Save MCP geojson only if there are results
     geojson_path = None
     if any(mcp_results.values()):
         for animal, percents in mcp_results.items():
@@ -613,16 +587,13 @@ def save_all_mcps_zip():
     if os.path.exists(archive):
         os.remove(archive)
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zipf:
-        if geojson_path and os.path.exists(geojson_path):
-            zipf.write(geojson_path, arcname="mcps_all.geojson")
-        if csv_path and os.path.exists(csv_path):
-            zipf.write(csv_path, arcname="home_range_areas.csv")
-        for animal, percents in kde_results.items():
-            for percent, v in percents.items():
-                if v.get("geotiff") and os.path.exists(v["geotiff"]):
-                    zipf.write(v["geotiff"], arcname=f"kde_{animal}_{percent}.tif")
-                if v.get("geojson") and os.path.exists(v["geojson"]):
-                    zipf.write(v["geojson"], arcname=f"kde_{animal}_{percent}.geojson")
+        for root, _, files in os.walk("outputs"):
+            for file in files:
+                if file.endswith('.zip'):
+                    continue
+                full_path = os.path.join(root, file)
+                rel_path = os.path.relpath(full_path, "outputs")
+                zipf.write(full_path, arcname=rel_path)
     print("ZIP written:", archive)
     return archive
 
