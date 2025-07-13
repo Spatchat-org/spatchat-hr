@@ -22,31 +22,31 @@ import tempfile
 
 print("Starting SpatChat (multi-MCP/KDE, robust download version)")
 
-# ====== GLOBAL STORAGE ======
 mcp_results = {}
 kde_results = {}
 requested_percents = set()
 requested_kde_percents = set()
 cached_df = None
 cached_headers = []
-RESULTS_READY = False
 
 def clear_all_results():
-    global mcp_results, kde_results, requested_percents, requested_kde_percents, RESULTS_READY
+    global mcp_results, kde_results, requested_percents, requested_kde_percents
     mcp_results = {}
     kde_results = {}
     requested_percents = set()
     requested_kde_percents = set()
-    RESULTS_READY = False
     # Clean outputs folder
     if os.path.exists("outputs"):
         for f in os.listdir("outputs"):
+            file_path = os.path.join("outputs", f)
             try:
-                os.remove(os.path.join("outputs", f))
+                if os.path.isfile(file_path) or os.path.islink(file_path):
+                    os.remove(file_path)
+                elif os.path.isdir(file_path):
+                    shutil.rmtree(file_path)
             except Exception:
                 pass
-    else:
-        os.makedirs("outputs", exist_ok=True)
+    os.makedirs("outputs", exist_ok=True)
 
 # ========== LLM SETUP (Together API) ==========
 load_dotenv()
@@ -428,7 +428,7 @@ def add_kdes(df, percent_list):
 
 # ========== Main Handlers ==========
 def handle_chat(chat_history, user_message):
-    global cached_df, mcp_results, kde_results, requested_percents, requested_kde_percents, RESULTS_READY
+    global cached_df, mcp_results, kde_results, requested_percents, requested_kde_percents
     chat_history = list(chat_history)
     tool, llm_output = ask_llm(chat_history, user_message)
     mcp_list, kde_list = [], []
@@ -450,12 +450,15 @@ def handle_chat(chat_history, user_message):
     if cached_df is None or "latitude" not in cached_df or "longitude" not in cached_df:
         chat_history.append({"role": "assistant", "content": "CSV must be uploaded with 'latitude' and 'longitude' columns."})
         return chat_history, gr.update(), gr.update(visible=False)
+    results_exist = False
     if mcp_list:
         add_mcps(cached_df, mcp_list)
         requested_percents.update(mcp_list)
+        results_exist = True
     if kde_list:
         add_kdes(cached_df, kde_list)
         requested_kde_percents.update(kde_list)
+        results_exist = True
     df = cached_df
     m = folium.Map(location=[df["latitude"].mean(), df["longitude"].mean()], zoom_start=9)
     folium.TileLayer("OpenStreetMap").add_to(m)
@@ -569,17 +572,16 @@ def handle_chat(chat_history, user_message):
     chat_history.append({"role": "user", "content": user_message})
     chat_history.append({"role": "assistant", "content": " ".join(msg) + " Download all results below."})
     # Only show download if there are results
-    return chat_history, gr.update(value=map_html), gr.update(visible=RESULTS_READY)
+    return chat_history, gr.update(value=m._repr_html_()), gr.update(visible=results_exist)
 
 # ========== ZIP Results ==========
 def save_all_mcps_zip():
-    # Only save if there is any result
-    global mcp_results, kde_results
+    os.makedirs("outputs", exist_ok=True)
     features = []
     rows = []
-    geojson_path = None
-    csv_path = None
+
     # Save MCP geojson only if there are results
+    geojson_path = None
     if any(mcp_results.values()):
         for animal, percents in mcp_results.items():
             for percent, v in percents.items():
@@ -597,25 +599,24 @@ def save_all_mcps_zip():
         geojson_path = os.path.join("outputs", "mcps_all.geojson")
         with open(geojson_path, "w") as f:
             json.dump(geojson, f)
-    # Add KDE results (area row and save files if present)
+
     for animal, percents in kde_results.items():
         for percent, v in percents.items():
             rows.append((animal, f"KDE-{percent}", v["area"]))
-    # Save CSV if there are any results
+    csv_path = None
     if rows:
         df = pd.DataFrame(rows, columns=["animal_id", "type", "area_km2"])
         csv_path = os.path.join("outputs", "home_range_areas.csv")
         df.to_csv(csv_path, index=False)
-    archive = "spatchat_results.zip"
+
+    archive = "outputs/spatchat_results.zip"
     if os.path.exists(archive):
         os.remove(archive)
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zipf:
-        # Only add if present
         if geojson_path and os.path.exists(geojson_path):
             zipf.write(geojson_path, arcname="mcps_all.geojson")
         if csv_path and os.path.exists(csv_path):
             zipf.write(csv_path, arcname="home_range_areas.csv")
-        # Add all KDE outputs (GeoTIFFs + GeoJSONs)
         for animal, percents in kde_results.items():
             for percent, v in percents.items():
                 if v.get("geotiff") and os.path.exists(v["geotiff"]):
