@@ -16,7 +16,6 @@ import re
 import rasterio
 from rasterio.transform import from_origin
 import matplotlib.pyplot as plt
-from scipy.stats import gaussian_kde
 from skimage import measure
 from sklearn.neighbors import KernelDensity
 import tempfile
@@ -24,12 +23,30 @@ import tempfile
 print("Starting SpatChat (multi-MCP/KDE, robust download version)")
 
 # ====== GLOBAL STORAGE ======
-mcp_results = {}    # animal_id -> {percent: {"polygon": Polygon, "area": area_km2}}
-kde_results = {}    # animal_id -> {percent: {"contour": Polygon/MultiPolygon, "area": area_km2, "geotiff": path, "geojson": path}}
+mcp_results = {}
+kde_results = {}
 requested_percents = set()
 requested_kde_percents = set()
 cached_df = None
 cached_headers = []
+RESULTS_READY = False
+
+def clear_all_results():
+    global mcp_results, kde_results, requested_percents, requested_kde_percents, RESULTS_READY
+    mcp_results = {}
+    kde_results = {}
+    requested_percents = set()
+    requested_kde_percents = set()
+    RESULTS_READY = False
+    # Clean outputs folder
+    if os.path.exists("outputs"):
+        for f in os.listdir("outputs"):
+            try:
+                os.remove(os.path.join("outputs", f))
+            except Exception:
+                pass
+    else:
+        os.makedirs("outputs", exist_ok=True)
 
 # ========== LLM SETUP (Together API) ==========
 load_dotenv()
@@ -114,26 +131,8 @@ def looks_invalid_latlon(df, lat_col, lon_col):
         return True
 
 def handle_upload_initial(file):
-    global cached_df, cached_headers, mcp_results, kde_results, requested_percents, requested_kde_percents
-
-    # Clean up all previous outputs, state, and results!
-    mcp_results = {}
-    kde_results = {}
-    requested_percents = set()
-    requested_kde_percents = set()
-    cached_df = None
-    cached_headers = []
-
-    # Remove all files from outputs/ dir
-    if os.path.exists("outputs"):
-        for f in os.listdir("outputs"):
-            try:
-                os.remove(os.path.join("outputs", f))
-            except Exception:
-                pass
-    else:
-        os.makedirs("outputs", exist_ok=True)
-
+    global cached_df, cached_headers
+    clear_all_results()
     os.makedirs("uploads", exist_ok=True)
     filename = os.path.join("uploads", os.path.basename(file))
     shutil.copy(file, filename)
@@ -142,7 +141,7 @@ def handle_upload_initial(file):
         cached_df = df
         cached_headers = list(df.columns)
     except Exception as e:
-        return [], *(gr.update(visible=False) for _ in range(8)), render_empty_map()
+        return [], *(gr.update(visible=False) for _ in range(8)), render_empty_map(), gr.update(visible=False)
     lower_cols = [col.lower() for col in df.columns]
     if "latitude" in lower_cols and "longitude" in lower_cols:
         lat_col = df.columns[lower_cols.index("latitude")]
@@ -155,12 +154,11 @@ def handle_upload_initial(file):
             gr.update(choices=cached_headers, value=lat_col, visible=True), \
             gr.update(visible=True), \
             render_empty_map(), \
-            *(gr.update(visible=True) for _ in range(4))
+            *(gr.update(visible=True) for _ in range(4)), gr.update(visible=False)
         else:
             return [
                 {"role": "assistant", "content": "CSV uploaded. Latitude and longitude detected. You may now proceed to create home ranges."}
-            ], *(gr.update(visible=False) for _ in range(3)), handle_upload_confirm("longitude", "latitude", ""), *(gr.update(visible=False) for _ in range(4))
-
+            ], *(gr.update(visible=False) for _ in range(3)), handle_upload_confirm("longitude", "latitude", ""), *(gr.update(visible=False) for _ in range(4)), gr.update(visible=False)
     # Try to auto-detect if lat/lon, else require user to specify X/Y and CRS
     x_names = ["x", "easting", "lon", "longitude"]
     y_names = ["y", "northing", "lat", "latitude"]
@@ -175,14 +173,13 @@ def handle_upload_initial(file):
         cached_df = df
         return [
             {"role": "assistant", "content": f"CSV uploaded. `{found_x}`/`{found_y}` interpreted as latitude/longitude."}
-        ], *(gr.update(visible=False) for _ in range(3)), handle_upload_confirm("longitude", "latitude", ""), *(gr.update(visible=False) for _ in range(4))
-    # If not lat/lon, prompt user for CRS
+        ], *(gr.update(visible=False) for _ in range(3)), handle_upload_confirm("longitude", "latitude", ""), *(gr.update(visible=False) for _ in range(4)), gr.update(visible=False)
     return [
         {"role": "assistant", "content": f"CSV uploaded. Your coordinates do not appear to be latitude/longitude. Please specify X (easting), Y (northing), and the CRS/UTM zone below."}
     ], \
     gr.update(choices=cached_headers, value=found_x, visible=True), \
     gr.update(choices=cached_headers, value=found_y, visible=True), \
-    gr.update(visible=True), render_empty_map(), *(gr.update(visible=True) for _ in range(4))
+    gr.update(visible=True), render_empty_map(), *(gr.update(visible=True) for _ in range(4)), gr.update(visible=False)
 
 def parse_crs_input(crs_input):
     crs_input = str(crs_input).strip().upper()
@@ -283,7 +280,7 @@ def mcp_polygon(latitudes, longitudes, percent=95):
     return hull_points
 
 def add_mcps(df, percent_list):
-    global mcp_results
+    global mcp_results, RESULTS_READY
     for percent in percent_list:
         for animal in df["animal_id"].unique():
             if animal not in mcp_results:
@@ -298,6 +295,7 @@ def add_mcps(df, percent_list):
                     poly_proj = Polygon(coords_proj)
                     area_km2 = poly_proj.area / 1e6
                     mcp_results[animal][percent] = {"polygon": poly, "area": area_km2}
+                    RESULTS_READY = True
 
 # ========== KDE Section ==========
 def kde_home_range(latitudes, longitudes, percent=95, grid_size=200):
@@ -315,7 +313,7 @@ def kde_home_range(latitudes, longitudes, percent=95, grid_size=200):
     if n > 1:
         stds = np.std(xy, axis=0, ddof=1)
         h = np.power(4 / (3 * n), 1 / 5) * np.mean(stds)
-        if h < 1:
+        if h < 1:  # Fallback
             h = 30.0
     else:
         h = 30.0
@@ -334,9 +332,9 @@ def kde_home_range(latitudes, longitudes, percent=95, grid_size=200):
     kde.fit(xy)
     Z = np.exp(kde.score_samples(grid_points)).reshape(X.shape)
 
-    # 5. Normalize UD so cell sum = 1 (important for cumulative probability contouring)
+    # 5. Normalize UD so cell sum = 1
     cell_area = (x_grid[1] - x_grid[0]) * (y_grid[1] - y_grid[0])
-    Z /= (Z.sum() * cell_area)  # Now sum(Z * cell_area) == 1
+    Z /= (Z.sum() * cell_area)
 
     # 6. Find threshold for requested percentile
     Z_flat = Z.flatten()
@@ -345,13 +343,14 @@ def kde_home_range(latitudes, longitudes, percent=95, grid_size=200):
     threshold = Z_flat[idx_desc][np.searchsorted(cumsum, percent / 100.0)]
     mask = Z >= threshold
 
-    # 7. Mask everything outside the threshold, then normalize again to sum to 1 (on top X%)
+    # Mask outside top-X%
     Z_masked = np.where(mask, Z, 0)
-    masked_sum = Z_masked.sum() * cell_area
-    if masked_sum > 0:
-        Z_masked /= masked_sum  # Renormalize to 1, but only over the top X%
+    # Re-normalize so UD in the mask sums to 1 (optional, but often preferred)
+    total_prob = Z_masked.sum() * cell_area
+    if total_prob > 0:
+        Z_masked /= total_prob
 
-    # 8. Extract contour(s) at the threshold in UTM meters
+    # 7. Extract contour(s) at the threshold in UTM meters
     contours = measure.find_contours(mask.astype(float), 0.5)
     polygons = []
     for contour in contours:
@@ -366,7 +365,7 @@ def kde_home_range(latitudes, longitudes, percent=95, grid_size=200):
     from shapely.ops import unary_union
     mpoly_utm = unary_union(polygons)
 
-    # 9. Transform contour(s) back to lat/lon for mapping/export
+    # 8. Transform contour(s) back to lat/lon for mapping/export
     def utm_poly_to_latlon(poly):
         if poly.is_empty:
             return None
@@ -382,12 +381,11 @@ def kde_home_range(latitudes, longitudes, percent=95, grid_size=200):
 
     mpoly_latlon = utm_poly_to_latlon(mpoly_utm)
 
-    # 10. Area in km2 (in UTM units)
+    # 9. Area in km2 (in UTM units)
     area_km2 = mpoly_utm.area / 1e6
 
-    # 11. Save truncated raster: only top X% UD (mask all else to zero, renormalized)
+    # 10. Save truncated raster: only top X% UD (mask all else to zero, re-normalized)
     tiff_fp = tempfile.mktemp(suffix=f"_kde_{percent}.tif", dir="outputs")
-    # Get WGS84 for SW and NE corners
     lon_sw, lat_sw = to_latlon.transform(xmin, ymin)
     lon_ne, lat_ne = to_latlon.transform(xmax, ymax)
     with rasterio.open(
@@ -401,8 +399,8 @@ def kde_home_range(latitudes, longitudes, percent=95, grid_size=200):
                               (lat_ne - lat_sw) / grid_size)
     ) as dst:
         dst.write(np.flipud(Z_masked), 1)
-
-    # 12. Export contour as geojson
+        
+    # 11. Export contour as geojson
     geojson_fp = tempfile.mktemp(suffix=f"_kde_{percent}.geojson", dir="outputs")
     with open(geojson_fp, "w") as f:
         json.dump(mapping(mpoly_latlon), f)
@@ -410,7 +408,7 @@ def kde_home_range(latitudes, longitudes, percent=95, grid_size=200):
     return mpoly_latlon, area_km2, tiff_fp, geojson_fp, Z_masked, None, None
 
 def add_kdes(df, percent_list):
-    global kde_results
+    global kde_results, RESULTS_READY
     os.makedirs("outputs", exist_ok=True)
     for percent in percent_list:
         for animal in df["animal_id"].unique():
@@ -426,10 +424,11 @@ def add_kdes(df, percent_list):
                         "contour": mpoly, "area": area_km2,
                         "geotiff": tiff_fp, "geojson": geojson_fp
                     }
+                    RESULTS_READY = True
 
 # ========== Main Handlers ==========
 def handle_chat(chat_history, user_message):
-    global cached_df, mcp_results, kde_results, requested_percents, requested_kde_percents
+    global cached_df, mcp_results, kde_results, requested_percents, requested_kde_percents, RESULTS_READY
     chat_history = list(chat_history)
     tool, llm_output = ask_llm(chat_history, user_message)
     mcp_list, kde_list = [], []
@@ -450,7 +449,7 @@ def handle_chat(chat_history, user_message):
         mcp_list = [95]
     if cached_df is None or "latitude" not in cached_df or "longitude" not in cached_df:
         chat_history.append({"role": "assistant", "content": "CSV must be uploaded with 'latitude' and 'longitude' columns."})
-        return chat_history, gr.update(), None
+        return chat_history, gr.update(), gr.update(visible=False)
     if mcp_list:
         add_mcps(cached_df, mcp_list)
         requested_percents.update(mcp_list)
@@ -492,7 +491,7 @@ def handle_chat(chat_history, user_message):
             ).add_to(points_layer)
     points_layer.add_to(m)
     paths_layer.add_to(m)
-    # MCP LAYERS (each as FeatureGroup for toggling)
+    # MCPs
     for percent in requested_percents:
         for animal in animal_ids:
             if animal in mcp_results and percent in mcp_results[animal]:
@@ -508,7 +507,7 @@ def handle_chat(chat_history, user_message):
                     )
                 )
                 m.add_child(mcp_layer)
-    # KDE RASTER & CONTOUR LAYERS (FeatureGroup for each, toggles)
+    # KDE RASTER & CONTOUR - Each with own FeatureGroup
     for percent in requested_kde_percents:
         for animal in animal_ids:
             if animal in kde_results and percent in kde_results[animal]:
@@ -517,7 +516,7 @@ def handle_chat(chat_history, user_message):
                 raster_layer = folium.FeatureGroup(name=f"{animal} KDE {percent}% Raster", show=True)
                 with rasterio.open(v["geotiff"]) as src:
                     arr = src.read(1)
-                    arr_norm = (arr - arr.min()) / (arr.max() - arr.min() + 1e-9)
+                    arr_norm = (arr - arr.min()) / (arr.max() - arr.min() + 1e-10)
                     cmap = plt.get_cmap('plasma')
                     rgba = (cmap(arr_norm) * 255).astype(np.uint8)
                     bounds = src.bounds
@@ -569,15 +568,18 @@ def handle_chat(chat_history, user_message):
         msg.append(f"KDE home ranges ({', '.join(str(p) for p in kde_list)}%) calculated (raster & contours).")
     chat_history.append({"role": "user", "content": user_message})
     chat_history.append({"role": "assistant", "content": " ".join(msg) + " Download all results below."})
-    return chat_history, gr.update(value=map_html), "spatchat_results.zip"
+    # Only show download if there are results
+    return chat_history, gr.update(value=map_html), gr.update(visible=RESULTS_READY)
 
 # ========== ZIP Results ==========
 def save_all_mcps_zip():
-    os.makedirs("outputs", exist_ok=True)
+    # Only save if there is any result
+    global mcp_results, kde_results
     features = []
     rows = []
-
-    # Only add MCP geojson if present
+    geojson_path = None
+    csv_path = None
+    # Save MCP geojson only if there are results
     if any(mcp_results.values()):
         for animal, percents in mcp_results.items():
             for percent, v in percents.items():
@@ -595,26 +597,20 @@ def save_all_mcps_zip():
         geojson_path = os.path.join("outputs", "mcps_all.geojson")
         with open(geojson_path, "w") as f:
             json.dump(geojson, f)
-    else:
-        geojson_path = None
-
-    # Add KDE results (areas and files if present)
+    # Add KDE results (area row and save files if present)
     for animal, percents in kde_results.items():
         for percent, v in percents.items():
             rows.append((animal, f"KDE-{percent}", v["area"]))
-
     # Save CSV if there are any results
     if rows:
         df = pd.DataFrame(rows, columns=["animal_id", "type", "area_km2"])
         csv_path = os.path.join("outputs", "home_range_areas.csv")
         df.to_csv(csv_path, index=False)
-    else:
-        csv_path = None
-
     archive = "spatchat_results.zip"
     if os.path.exists(archive):
         os.remove(archive)
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zipf:
+        # Only add if present
         if geojson_path and os.path.exists(geojson_path):
             zipf.write(geojson_path, arcname="mcps_all.geojson")
         if csv_path and os.path.exists(csv_path):
@@ -696,7 +692,8 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
             download_btn = gr.DownloadButton(
                 "📥 Download Results",
                 save_all_mcps_zip,
-                label="Download Results"
+                label="Download Results",
+                visible=False # initially hidden
             )
 
     file_input.change(
@@ -704,7 +701,7 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
         inputs=file_input,
         outputs=[
             chatbot, x_col, y_col, crs_input, map_output,
-            x_col, y_col, crs_input, confirm_btn
+            x_col, y_col, crs_input, confirm_btn, download_btn
         ]
     )
     confirm_btn.click(
