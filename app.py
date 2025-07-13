@@ -564,55 +564,56 @@ def handle_chat(chat_history, user_message):
 
 # ========== ZIP Results ==========
 def save_all_mcps_zip():
-    os.makedirs("outputs", exist_ok=True)
+    # 1) ensure outputs folder exists
+    outputs_dir = "outputs"
+    os.makedirs(outputs_dir, exist_ok=True)
+
+    # 2) remove any stale ZIP so we start fresh
+    archive = os.path.join(outputs_dir, "spatchat_results.zip")
+    if os.path.exists(archive):
+        os.remove(archive)
+
+    # 3) write GeoJSON of MCPs (if any)
     features = []
-    rows = []
-    # Remove any existing zip files to avoid mixing results between sessions
-    for fname in os.listdir("outputs"):
-        if fname.endswith(".zip"):
-            os.remove(os.path.join("outputs", fname))
-    geojson_path = None
-    if any(mcp_results.values()):
-        for animal, percents in mcp_results.items():
-            for percent, v in percents.items():
-                features.append({
-                    "type": "Feature",
-                    "properties": {
-                        "animal_id": animal,
-                        "percent": percent,
-                        "area_km2": v["area"]
-                    },
-                    "geometry": mapping(v["polygon"])
-                })
-                rows.append((animal, f"MCP-{percent}", v["area"]))
+    for animal, percs in mcp_results.items():
+        for pct, v in percs.items():
+            features.append({
+                "type": "Feature",
+                "properties": {
+                    "animal_id": animal,
+                    "percent": pct,
+                    "area_km2": v["area"]
+                },
+                "geometry": mapping(v["polygon"])
+            })
+    if features:
         geojson = {"type": "FeatureCollection", "features": features}
-        geojson_path = os.path.join("outputs", "mcps_all.geojson")
-        with open(geojson_path, "w") as f:
+        with open(os.path.join(outputs_dir, "mcps_all.geojson"), "w") as f:
             json.dump(geojson, f)
 
-    for animal, percents in kde_results.items():
-        for percent, v in percents.items():
-            rows.append((animal, f"KDE-{percent}", v["area"]))
-    csv_path = None
+    # 4) write CSV of areas (MCP + KDE)
+    rows = []
+    for animal, percs in mcp_results.items():
+        for pct, v in percs.items():
+            rows.append((animal, f"MCP-{pct}", v["area"]))
+    for animal, percs in kde_results.items():
+        for pct, v in percs.items():
+            rows.append((animal, f"KDE-{pct}", v["area"]))
     if rows:
         df = pd.DataFrame(rows, columns=["animal_id", "type", "area_km2"])
-        csv_path = os.path.join("outputs", "home_range_areas.csv")
-        df.to_csv(csv_path, index=False)
+        df.to_csv(os.path.join(outputs_dir, "home_range_areas.csv"), index=False)
 
-    # Use a unique filename for each zip (using current timestamp)
-    archive = os.path.join("outputs", f"spatchat_results_{int(time.time())}.zip")
-        
-    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zipf:
-        for root, _, files in os.walk("outputs"):
-            for file in files:
-                if file.endswith('.zip'):
+    # 5) zip everything under outputs/, skipping any .zip files
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
+        for root, _, files in os.walk(outputs_dir):
+            for fname in files:
+                if fname.endswith(".zip"):
                     continue
-                full_path = os.path.join(root, file)
-                rel_path = os.path.relpath(full_path, "outputs")
-                zipf.write(full_path, arcname=rel_path)
-    print("ZIP written:", archive)
-    # Return both the path and the user‐visible filename
-    return archive, "spatchat_results.zip"
+                full = os.path.join(root, fname)
+                rel = os.path.relpath(full, outputs_dir)
+                zf.write(full, arcname=rel)
+
+    return archive
 
 # ========== UI ==========
 with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
@@ -680,9 +681,9 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
             map_output = gr.HTML(label="Map Preview", value=render_empty_map(), show_label=False)
             # DownloadButton now calls save_all_mcps_zip and uses the returned tuple
             download_btn = gr.DownloadButton(
-                value=save_all_mcps_zip,
+                fn=save_all_mcps_zip,     # will be run when clicked
                 label="📥 Download Results",
-                visible=False
+                visible=False             # toggle this on in handle_chat
             )
 
     file_input.change(
