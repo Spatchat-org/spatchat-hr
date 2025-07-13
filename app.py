@@ -611,7 +611,8 @@ def save_all_mcps_zip():
                 rel_path = os.path.relpath(full_path, "outputs")
                 zipf.write(full_path, arcname=rel_path)
     print("ZIP written:", archive)
-    return archive
+    # Return both the path and the user‐visible filename
+    return archive, "spatchat_results.zip"
 
 # ========== UI ==========
 with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
@@ -677,12 +678,11 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
             confirm_btn = gr.Button("Confirm Coordinate Settings", visible=False)
         with gr.Column(scale=3):
             map_output = gr.HTML(label="Map Preview", value=render_empty_map(), show_label=False)
+            # DownloadButton now calls save_all_mcps_zip and uses the returned tuple
             download_btn = gr.DownloadButton(
-                "📥 Download Results",
-                save_all_mcps_zip,
-                label="Download Results",
-                file_name="spatchat_results.zip",  # user will see this name
-                visible=False  # hidden until results exist
+                value=save_all_mcps_zip,
+                label="📥 Download Results",
+                visible=False
             )
 
     file_input.change(
