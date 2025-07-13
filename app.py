@@ -606,6 +606,7 @@ def save_all_mcps_zip():
     return archive
 
 # ========== UI ==========
+# ========== UI ==========
 with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     gr.Image(
         value="logo_long1.png",
@@ -673,41 +674,26 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
                 "📥 Download Results",
                 save_all_mcps_zip,
                 label="Download Results",
-                visible=False # initially hidden
+                visible=False  # only shown after a calculation
             )
 
-    # SESSION STATE and session_init go here!
-    session_state = gr.State({"initialized": False})
-
-    def session_init(state):
-        if not state.get("initialized", False):
-            clear_all_results()
-            state["initialized"] = True
-        return state
-
-    demo.load(session_init, inputs=[session_state], outputs=[session_state])
-
+    # ——— wiring callbacks ———
     file_input.change(
         fn=handle_upload_initial,
-        inputs=file_input,
-        outputs=[
-            chatbot, x_col, y_col, crs_input, map_output,
-            x_col, y_col, crs_input, confirm_btn, download_btn
-        ]
+        inputs=[file_input],
+        outputs=[chatbot, x_col, y_col, crs_input, map_output, x_col, y_col, crs_input, confirm_btn, download_btn]
     )
     confirm_btn.click(
         fn=handle_upload_confirm,
         inputs=[x_col, y_col, crs_input],
-        outputs=map_output
+        outputs=[map_output]
     )
     user_input.submit(
         fn=handle_chat,
         inputs=[chatbot, user_input],
         outputs=[chatbot, map_output, download_btn]
     )
-    user_input.submit(lambda *args: "", inputs=None, outputs=user_input)
-
-# END of with gr.Blocks
+    # clear the textbox after submit
+    user_input.submit(lambda *args: "", inputs=None, outputs=[user_input])
 
 demo.launch(ssr_mode=False)
-
