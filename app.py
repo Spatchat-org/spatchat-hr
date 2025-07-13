@@ -607,9 +607,6 @@ def save_all_mcps_zip():
 
 # ========== UI ==========
 with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
-    # ------ SESSION STATE ------
-    session_state = gr.State({"initialized": False})  # <<<<<<< NEW
-
     gr.Image(
         value="logo_long1.png",
         show_label=False,
@@ -679,6 +676,17 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
                 visible=False # initially hidden
             )
 
+    # SESSION STATE and session_init go here!
+    session_state = gr.State({"initialized": False})
+
+    def session_init(state):
+        if not state.get("initialized", False):
+            clear_all_results()
+            state["initialized"] = True
+        return state
+
+    demo.load(session_init, inputs=[session_state], outputs=[session_state])
+
     file_input.change(
         fn=handle_upload_initial,
         inputs=file_input,
@@ -699,13 +707,7 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     )
     user_input.submit(lambda *args: "", inputs=None, outputs=user_input)
 
-# ------ SESSION RESET LOGIC ------
-def session_init(state):
-    if not state.get("initialized", False):
-        clear_all_results()
-        state["initialized"] = True
-    return state
-
-demo.load(session_init, inputs=[session_state], outputs=[session_state])
+# END of with gr.Blocks
 
 demo.launch(ssr_mode=False)
+
