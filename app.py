@@ -559,12 +559,12 @@ def handle_chat(chat_history, user_message):
 
 # ========== ZIP Results ==========
 def save_all_mcps_zip():
+    # make sure outputs exists
     os.makedirs("outputs", exist_ok=True)
-    features = []
-    rows = []
 
-    geojson_path = None
+    # 1) Write the combined GeoJSON if any MCPs exist
     if any(mcp_results.values()):
+        features = []
         for animal, percents in mcp_results.items():
             for percent, v in percents.items():
                 features.append({
@@ -576,33 +576,37 @@ def save_all_mcps_zip():
                     },
                     "geometry": mapping(v["polygon"])
                 })
-                rows.append((animal, f"MCP-{percent}", v["area"]))
         geojson = {"type": "FeatureCollection", "features": features}
         geojson_path = os.path.join("outputs", "mcps_all.geojson")
         with open(geojson_path, "w") as f:
             json.dump(geojson, f)
+    else:
+        geojson_path = None
 
+    # 2) Write the summary CSV if there are any areas (MCP or KDE)
+    rows = []
+    for animal, percents in mcp_results.items():
+        for percent, v in percents.items():
+            rows.append((animal, f"MCP-{percent}", v["area"]))
     for animal, percents in kde_results.items():
         for percent, v in percents.items():
             rows.append((animal, f"KDE-{percent}", v["area"]))
-    csv_path = None
     if rows:
-        df = pd.DataFrame(rows, columns=["animal_id", "type", "area_km2"])
         csv_path = os.path.join("outputs", "home_range_areas.csv")
-        df.to_csv(csv_path, index=False)
+        pd.DataFrame(rows, columns=["animal_id", "type", "area_km2"]).to_csv(csv_path, index=False)
+    else:
+        csv_path = None
 
-    archive = "outputs/spatchat_results.zip"
+    # 3) Build the ZIP at the repo root (so Gradio picks it up cleanly)
+    archive = "spatchat_results.zip"
     if os.path.exists(archive):
         os.remove(archive)
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zipf:
-        for root, _, files in os.walk("outputs"):
-            for file in files:
-                if file.endswith('.zip'):
-                    continue
-                full_path = os.path.join(root, file)
-                rel_path = os.path.relpath(full_path, "outputs")
-                zipf.write(full_path, arcname=rel_path)
-    print("ZIP written:", archive)
+        if geojson_path:
+            zipf.write(geojson_path, arcname="mcps_all.geojson")
+        if csv_path:
+            zipf.write(csv_path, arcname="home_range_areas.csv")
+
     return archive
 
 # ========== UI ==========
@@ -669,11 +673,8 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
             confirm_btn = gr.Button("Confirm Coordinate Settings", visible=False)
         with gr.Column(scale=3):
             map_output = gr.HTML(label="Map Preview", value=render_empty_map(), show_label=False)
-            download_btn = gr.DownloadButton(
-                "📥 Download Results",
-                save_all_mcps_zip,
-                visible=False
-            )
+            download_btn = gr.DownloadButton("📥 Download Results", save_all_mcps_zip, visible=False)
+
             
     # ——— wiring callbacks ———
     file_input.change(
