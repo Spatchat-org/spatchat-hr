@@ -596,6 +596,15 @@ def save_all_mcps_zip():
     print("ZIP written:", archive)
     return archive
 
+def save_all_mcps_zip_wrapper():
+    archive = save_all_mcps_zip()  # this calls your existing zip-creation code
+    import time, shutil, os
+    temp_name = f"outputs/spatchat_results_{int(time.time())}.zip"
+    if os.path.exists(temp_name):
+        os.remove(temp_name)
+    shutil.copy(archive, temp_name)
+    return temp_name
+
 # ========== UI ==========
 with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     gr.Image(
@@ -687,6 +696,6 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     user_input.submit(lambda *args: "", inputs=None, outputs=user_input)
 
     # ========== FIX: Click handler for DownloadButton ==========
-    download_btn.click(fn=save_all_mcps_zip, inputs=None, outputs=[download_btn])
+    download_btn.click(fn=save_all_mcps_zip_wrapper, inputs=None, outputs=[download_btn])
 
 demo.launch(ssr_mode=False)
