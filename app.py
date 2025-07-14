@@ -324,7 +324,9 @@ def kde_home_range(latitudes, longitudes, percent=95, animal_id="animal", grid_s
     Z_flat = Z.flatten()
     idx_desc = np.argsort(Z_flat)[::-1]
     cumsum = np.cumsum(Z_flat[idx_desc] * cell_area)
-    threshold = Z_flat[idx_desc][np.searchsorted(cumsum, percent / 100.0)]
+    target = percent / 100.0
+    idx = min(np.searchsorted(cumsum, target), len(Z_flat[idx_desc]) - 1)
+    threshold = Z_flat[idx_desc][idx]
     mask = Z >= threshold
 
     Z_masked = np.where(mask, Z, 0)
