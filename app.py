@@ -431,6 +431,13 @@ def handle_chat(chat_history, user_message):
     if cached_df is None or "latitude" not in cached_df or "longitude" not in cached_df:
         chat_history.append({"role": "assistant", "content": "CSV must be uploaded with 'latitude' and 'longitude' columns."})
         return chat_history, gr.update(), gr.update(visible=False)
+
+    # --------- KDE 100% PATCH ----------
+    kde_warning = None
+    if kde_list and any(p == 100 for p in kde_list):
+        kde_list = [p if p < 100 else 99.99 for p in kde_list]
+        kde_warning = "Note: KDE at 100% is not supported and has been replaced by 99.99% for compatibility (as done in scientific software)."
+
     results_exist = False
     if mcp_list:
         add_mcps(cached_df, mcp_list)
@@ -440,6 +447,7 @@ def handle_chat(chat_history, user_message):
         add_kdes(cached_df, kde_list)
         requested_kde_percents.update(kde_list)
         results_exist = True
+
     df = cached_df
     m = folium.Map(location=[df["latitude"].mean(), df["longitude"].mean()], zoom_start=9)
     folium.TileLayer("OpenStreetMap").add_to(m)
@@ -552,6 +560,10 @@ def handle_chat(chat_history, user_message):
         msg.append(f"KDE home ranges ({', '.join(str(p) for p in kde_list)}%) calculated (raster & contours).")
     chat_history.append({"role": "user", "content": user_message})
     chat_history.append({"role": "assistant", "content": " ".join(msg) + " Download all results below."})
+
+    # Append the KDE warning if needed
+    if kde_warning:
+        chat_history.append({"role": "assistant", "content": kde_warning})
 
     # --- PATCH: Always generate the ZIP with current results for DownloadButton ---
     archive_path = save_all_mcps_zip()
