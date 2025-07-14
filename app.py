@@ -250,6 +250,8 @@ def handle_upload_confirm(x_col, y_col, crs_input):
 
 def parse_levels_from_text(text):
     levels = [int(val) for val in re.findall(r'\b([1-9][0-9]?|100)\b', text)]
+    # Clamp any value > 99 to 99 (for KDE, but also doesn't hurt MCP)
+    levels = [min(l, 99) for l in levels]
     if not levels:
         return [95]
     return sorted(set(levels))
@@ -414,31 +416,51 @@ def handle_chat(chat_history, user_message):
     tool, llm_output = ask_llm(chat_history, user_message)
     mcp_list, kde_list = [], []
     method = None
+
+    # --- Parse tool output for home range requests ---
     if tool and tool.get("tool") == "home_range":
         method = tool.get("method")
         levels = tool.get("levels", [95])
-        levels = [int(p) for p in levels if 1 <= int(p) <= 100]
+        # Clamp all requests at 99 (for KDE/mcp)
+        levels = [min(int(p), 99) for p in levels if 1 <= int(p) <= 100]
         if method == "mcp":
             mcp_list = levels
         elif method == "kde":
             kde_list = levels
+
+    # --- Fallback: parse plain user message for explicit % ---
     if "mcp" in user_message.lower():
         mcp_list = parse_levels_from_text(user_message)
     if "kde" in user_message.lower():
         kde_list = parse_levels_from_text(user_message)
+
+    # --- PATCH: Only require CSV for actual analysis ---
     if not mcp_list and not kde_list:
-        mcp_list = [95]
+        # Not a home range request; reply as LLM
+        if llm_output:
+            chat_history.append({"role": "user", "content": user_message})
+            chat_history.append({"role": "assistant", "content": llm_output})
+            return chat_history, gr.update(), gr.update(visible=False)
+        else:
+            chat_history.append({"role": "assistant", "content": "How can I help you? Please upload a CSV for analysis or ask a question."})
+            return chat_history, gr.update(), gr.update(visible=False)
+
+    # --- CSV check: only if doing an analysis ---
     if cached_df is None or "latitude" not in cached_df or "longitude" not in cached_df:
         chat_history.append({"role": "assistant", "content": "CSV must be uploaded with 'latitude' and 'longitude' columns."})
         return chat_history, gr.update(), gr.update(visible=False)
 
-    # --------- KDE 100% PATCH ----------
-    kde_warning = None
-    if kde_list and any(p == 100 for p in kde_list):
-        kde_list = [p if p < 100 else 99.99 for p in kde_list]
-        kde_warning = "Note: KDE at 100% is not supported and has been replaced by 99.99% for compatibility (as done in scientific software)."
-
     results_exist = False
+    warned_about_kde_100 = False
+
+    # --- Clamp/Detect KDE 100% requests and set warning ---
+    if kde_list:
+        if 100 in kde_list or any("100" in s for s in user_message.split()):
+            warned_about_kde_100 = True
+        # Clamp all values at 99
+        kde_list = [min(k, 99) for k in kde_list]
+
+    # --- Run Analyses ---
     if mcp_list:
         add_mcps(cached_df, mcp_list)
         requested_percents.update(mcp_list)
@@ -448,6 +470,7 @@ def handle_chat(chat_history, user_message):
         requested_kde_percents.update(kde_list)
         results_exist = True
 
+    # --- Build Map ---
     df = cached_df
     m = folium.Map(location=[df["latitude"].mean(), df["longitude"].mean()], zoom_start=9)
     folium.TileLayer("OpenStreetMap").add_to(m)
@@ -483,6 +506,7 @@ def handle_chat(chat_history, user_message):
             ).add_to(points_layer)
     points_layer.add_to(m)
     paths_layer.add_to(m)
+
     # MCPs
     for percent in requested_percents:
         for animal in animal_ids:
@@ -499,12 +523,12 @@ def handle_chat(chat_history, user_message):
                     )
                 )
                 m.add_child(mcp_layer)
+
     # KDE RASTER & CONTOUR
     for percent in requested_kde_percents:
         for animal in animal_ids:
             if animal in kde_results and percent in kde_results[animal]:
                 v = kde_results[animal][percent]
-                # --- KDE Raster Layer ---
                 raster_layer = folium.FeatureGroup(name=f"{animal} KDE {percent}% Raster", show=True)
                 with rasterio.open(v["geotiff"]) as src:
                     arr = src.read(1)
@@ -524,7 +548,7 @@ def handle_chat(chat_history, user_message):
                         )
                     )
                 m.add_child(raster_layer)
-                # --- KDE Contour Layer ---
+                # KDE Contour
                 contour_layer = folium.FeatureGroup(name=f"{animal} KDE {percent}% Contour", show=True)
                 contour = v["contour"]
                 if contour:
@@ -558,14 +582,12 @@ def handle_chat(chat_history, user_message):
         msg.append(f"MCP home ranges ({', '.join(str(p) for p in mcp_list)}%) calculated.")
     if kde_list:
         msg.append(f"KDE home ranges ({', '.join(str(p) for p in kde_list)}%) calculated (raster & contours).")
+    if warned_about_kde_100:
+        msg.append("Note: KDE at 100% is not supported and has been replaced by 99% for compatibility (as done in scientific software).")
     chat_history.append({"role": "user", "content": user_message})
     chat_history.append({"role": "assistant", "content": " ".join(msg) + " Download all results below."})
 
-    # Append the KDE warning if needed
-    if kde_warning:
-        chat_history.append({"role": "assistant", "content": kde_warning})
-
-    # --- PATCH: Always generate the ZIP with current results for DownloadButton ---
+    # --- Always generate the ZIP with current results for DownloadButton ---
     archive_path = save_all_mcps_zip()
 
     return chat_history, gr.update(value=m._repr_html_()), gr.update(value=archive_path, visible=results_exist)
