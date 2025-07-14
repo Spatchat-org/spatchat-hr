@@ -288,7 +288,7 @@ def add_mcps(df, percent_list):
                     mcp_results[animal][percent] = {"polygon": poly, "area": area_km2}
 
 # ========== KDE Section ==========
-def kde_home_range(latitudes, longitudes, percent=95, grid_size=200):
+def kde_home_range(latitudes, longitudes, percent=95, animal_id="animal", grid_size=200):
     lon0, lat0 = np.mean(longitudes), np.mean(latitudes)
     utm_zone = int((lon0 + 180) // 6) + 1
     epsg_utm = 32600 + utm_zone if lat0 >= 0 else 32700 + utm_zone
@@ -362,7 +362,10 @@ def kde_home_range(latitudes, longitudes, percent=95, grid_size=200):
     mpoly_latlon = utm_poly_to_latlon(mpoly_utm)
     area_km2 = mpoly_utm.area / 1e6
 
-    tiff_fp = tempfile.mktemp(suffix=f"_kde_{percent}.tif", dir="outputs")
+    safe_id = str(animal_id).replace(" ", "_").replace("/", "_")
+
+    tiff_fp = os.path.join("outputs", f"kde_{safe_id}_{percent}.tif")
+    
     lon_sw, lat_sw = to_latlon.transform(xmin, ymin)
     lon_ne, lat_ne = to_latlon.transform(xmax, ymax)
     with rasterio.open(
@@ -377,7 +380,8 @@ def kde_home_range(latitudes, longitudes, percent=95, grid_size=200):
     ) as dst:
         dst.write(np.flipud(Z_masked), 1)
 
-    geojson_fp = tempfile.mktemp(suffix=f"_kde_{percent}.geojson", dir="outputs")
+    geojson_fp = os.path.join("outputs", f"kde_{safe_id}_{percent}.geojson")
+    
     with open(geojson_fp, "w") as f:
         json.dump(mapping(mpoly_latlon), f)
 
@@ -393,7 +397,7 @@ def add_kdes(df, percent_list):
             if percent not in kde_results[animal]:
                 track = df[df["animal_id"] == animal]
                 mpoly, area_km2, tiff_fp, geojson_fp, *_ = kde_home_range(
-                    track['latitude'].values, track['longitude'].values, percent
+                    track['latitude'].values, track['longitude'].values, percent, animal_id=animal
                 )
                 if mpoly is not None:
                     kde_results[animal][percent] = {
