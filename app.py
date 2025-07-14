@@ -35,7 +35,6 @@ def clear_all_results():
     kde_results = {}
     requested_percents = set()
     requested_kde_percents = set()
-    # Clean outputs folder and reset everything for new session
     if os.path.exists("outputs"):
         shutil.rmtree("outputs")
     os.makedirs("outputs", exist_ok=True)
@@ -661,11 +660,10 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
             confirm_btn = gr.Button("Confirm Coordinate Settings", visible=False)
         with gr.Column(scale=3):
             map_output = gr.HTML(label="Map Preview", value=render_empty_map(), show_label=False)
+            # ========== FIX: DownloadButton only has label/visible, NO fn here ==========
             download_btn = gr.DownloadButton(
-                "📥 Download Results",
-                save_all_mcps_zip,
-                label="Download Results",
-                visible=False # initially hidden
+                label="📥 Download Results",
+                visible=False
             )
 
     file_input.change(
@@ -687,5 +685,8 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
         outputs=[chatbot, map_output, download_btn]
     )
     user_input.submit(lambda *args: "", inputs=None, outputs=user_input)
+
+    # ========== FIX: Click handler for DownloadButton ==========
+    download_btn.click(fn=save_all_mcps_zip, inputs=None, outputs=[download_btn])
 
 demo.launch(ssr_mode=False)
