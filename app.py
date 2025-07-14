@@ -546,7 +546,11 @@ def handle_chat(chat_history, user_message):
         msg.append(f"KDE home ranges ({', '.join(str(p) for p in kde_list)}%) calculated (raster & contours).")
     chat_history.append({"role": "user", "content": user_message})
     chat_history.append({"role": "assistant", "content": " ".join(msg) + " Download all results below."})
-    return chat_history, gr.update(value=m._repr_html_()), gr.update(visible=results_exist)
+
+    # --- PATCH: Always generate the ZIP with current results for DownloadButton ---
+    archive_path = save_all_mcps_zip()
+
+    return chat_history, gr.update(value=m._repr_html_()), gr.update(value=archive_path, visible=results_exist)
 
 # ========== ZIP Results ==========
 def save_all_mcps_zip():
@@ -662,8 +666,9 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
             map_output = gr.HTML(label="Map Preview", value=render_empty_map(), show_label=False)
             # ========== FIX: DownloadButton only has label/visible, NO fn here ==========
             download_btn = gr.DownloadButton(
-                label="📥 Download Results",
-                visible=False
+                "📥 Download Results",
+                value=None,       # no initial file, will be set by the handler
+                visible=False     # stays hidden until results ready
             )
     file_input.change(
         fn=handle_upload_initial,
@@ -684,8 +689,5 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
         outputs=[chatbot, map_output, download_btn]
     )
     user_input.submit(lambda *args: "", inputs=None, outputs=user_input)
-
-    # ========== FIX: Click handler for DownloadButton ==========
-    download_btn.click(save_all_mcps_zip, inputs=save_all_mcps_zip, outputs=[download_btn])
 
 demo.launch(ssr_mode=False)
