@@ -597,13 +597,11 @@ def save_all_mcps_zip():
     return archive
 
 def save_all_mcps_zip_wrapper():
-    archive = save_all_mcps_zip()  # this calls your existing zip-creation code
-    import time, shutil, os
-    temp_name = f"outputs/spatchat_results_{int(time.time())}.zip"
-    if os.path.exists(temp_name):
-        os.remove(temp_name)
-    shutil.copy(archive, temp_name)
-    return temp_name
+    archive = save_all_mcps_zip()  # always outputs outputs/spatchat_results.zip
+    import time
+    temp_path = f"outputs/spatchat_results_{int(time.time())}.zip"
+    shutil.copy(archive, temp_path)
+    return temp_path
 
 # ========== UI ==========
 with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
