@@ -663,10 +663,8 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
             # ========== FIX: DownloadButton only has label/visible, NO fn here ==========
             download_btn = gr.DownloadButton(
                 label="📥 Download Results",
-                save_all_mcps_zip,
                 visible=False
             )
-
     file_input.change(
         fn=handle_upload_initial,
         inputs=file_input,
@@ -687,7 +685,7 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     )
     user_input.submit(lambda *args: "", inputs=None, outputs=user_input)
 
-#    # ========== FIX: Click handler for DownloadButton ==========
-#    download_btn.click(fn=save_all_mcps_zip, inputs=None, outputs=[download_btn])
+    # ========== FIX: Click handler for DownloadButton ==========
+    download_btn.click(save_all_mcps_zip, inputs=save_all_mcps_zip, outputs=[download_btn])
 
 demo.launch(ssr_mode=False)
