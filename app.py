@@ -7,7 +7,6 @@ import shutil
 import random
 import numpy as np
 from pyproj import Transformer
-from together import Together
 from dotenv import load_dotenv
 from scipy.spatial import ConvexHull
 from shapely.geometry import Polygon, mapping, MultiPolygon
@@ -19,6 +18,15 @@ import matplotlib.pyplot as plt
 from skimage import measure
 from sklearn.neighbors import KernelDensity
 import tempfile
+import time
+import threading
+import random
+import sys
+
+# LLM providers
+from huggingface_hub import InferenceClient
+from together import Together
+from together.error import RateLimitError, ServiceUnavailableError
 
 print("Starting SpatChat (multi-MCP/KDE, robust download version)")
 
@@ -39,9 +47,160 @@ def clear_all_results():
         shutil.rmtree("outputs")
     os.makedirs("outputs", exist_ok=True)
 
-# ========== LLM SETUP (Together API) ==========
+# ========== LLM SETUP (HF primary, Together fallback) ==========
 load_dotenv()
-client = Together(api_key=os.getenv("TOGETHER_API_KEY"))
+
+# Helpers for robust content extraction across SDKs
+def _choice_content(choice):
+    """
+    Extract assistant text from HF/Together pydantic/dict choices.
+    Handles str or list-of-parts content.
+    """
+    msg = getattr(choice, "message", None)
+    if msg is None and isinstance(choice, dict):
+        msg = choice.get("message")
+
+    content = None
+    if msg is not None:
+        if isinstance(msg, dict):
+            content = msg.get("content")
+        else:
+            content = getattr(msg, "content", None)
+
+    # HF can return structured content parts
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "text":
+                parts.append(part.get("text", ""))
+            elif isinstance(part, str):
+                parts.append(part)
+        content = "".join(parts)
+
+    return content or ""
+
+def _delta_text(delta):
+    if isinstance(delta, dict):
+        return delta.get("content", "")
+    return getattr(delta, "content", "")
+
+HF_MODEL_DEFAULT = "meta-llama/Meta-Llama-3.1-8B-Instruct"
+TOGETHER_MODEL_DEFAULT = "meta-llama/Llama-3.3-70B-Instruct-Turbo-Free"
+
+class _SpacedCallLimiter:
+    """Ensure at least `min_interval_seconds` between calls (per process)."""
+    def __init__(self, min_interval_seconds: float):
+        self.min_interval = float(min_interval_seconds)
+        self._lock = threading.Lock()
+        self._last = 0.0
+    def wait(self):
+        with self._lock:
+            now = time.monotonic()
+            elapsed = now - self._last
+            if elapsed < self.min_interval:
+                time.sleep(self.min_interval - elapsed)
+            self._last = time.monotonic()
+
+class UnifiedLLM:
+    """
+    Primary: Hugging Face (Serverless or Endpoint via HF_ENDPOINT_URL)
+    Fallback: Together.ai (if TOGETHER_API_KEY present)
+    Return: plain string response content
+    """
+    def __init__(self):
+        hf_model_or_url = (os.getenv("HF_ENDPOINT_URL") or HF_MODEL_DEFAULT).strip()
+        hf_token = (os.getenv("HF_TOKEN") or "").strip()
+
+        self.hf_client = InferenceClient(
+            model=hf_model_or_url,
+            token=hf_token,
+            timeout=300,
+        )
+
+        self.together = None
+        self.together_model = (os.getenv("TOGETHER_MODEL") or TOGETHER_MODEL_DEFAULT).strip()
+        tg_key = (os.getenv("TOGETHER_API_KEY") or "").strip()
+        if tg_key:
+            self.together = Together(api_key=tg_key)
+            self._tg_limiter = _SpacedCallLimiter(min_interval_seconds=100.0)  # 0.6 QPM
+
+    def _hf_chat(self, messages, max_tokens=512, temperature=0.0, stream=False):
+        tries, delay = 3, 2.5
+        last_err = None
+        for _ in range(tries):
+            try:
+                if hasattr(self.hf_client, "chat_completion"):
+                    resp = self.hf_client.chat_completion(
+                        messages=messages,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                        stream=stream,
+                    )
+                    if stream:
+                        text = "".join(_delta_text(ch.choices[0].delta) for ch in resp)
+                    else:
+                        text = _choice_content(resp.choices[0])
+                    return text
+                else:
+                    # fallback to text_generation if needed
+                    prompt = self._messages_to_prompt(messages)
+                    text = self.hf_client.text_generation(
+                        prompt,
+                        max_new_tokens=max_tokens,
+                        temperature=temperature,
+                        stream=False,
+                        return_full_text=False,
+                    )
+                    return text
+            except Exception as e:
+                last_err = e
+                time.sleep(delay)
+                delay *= 1.8
+        raise last_err
+
+    @staticmethod
+    def _messages_to_prompt(messages):
+        parts = []
+        for m in messages:
+            role = m.get("role", "user")
+            content = m.get("content", "")
+            if role == "system":
+                parts.append(f"<|system|>\n{content}\n")
+            elif role == "user":
+                parts.append(f"<|user|>\n{content}\n")
+            else:
+                parts.append(f"<|assistant|>\n{content}\n")
+        parts.append("<|assistant|>\n")
+        return "".join(parts)
+
+    def chat(self, messages, temperature=0.0, max_tokens=512, stream=False):
+        try:
+            return self._hf_chat(messages, max_tokens=max_tokens, temperature=temperature, stream=stream)
+        except Exception as hf_err:
+            print(f"[LLM] HF primary failed: {hf_err}", file=sys.stderr)
+            if self.together is None:
+                raise
+
+            # Pace Together BEFORE first attempt
+            self._tg_limiter.wait()
+            backoff = 12.0
+            for attempt in range(4):
+                try:
+                    resp = self.together.chat.completions.create(
+                        model=self.together_model,
+                        messages=messages,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        stream=stream,
+                    )
+                    return _choice_content(resp.choices[0])
+                except (RateLimitError, ServiceUnavailableError) as e:
+                    if attempt == 3:
+                        raise
+                    time.sleep(backoff + random.uniform(0, 3))
+                    backoff *= 1.8
+
+llm = UnifiedLLM()
 
 SYSTEM_PROMPT = """
 You are SpatChat, an expert wildlife home range analysis assistant.
@@ -51,32 +210,33 @@ If the user asks for a home range calculation (MCP, KDE, dBBMM, AKDE, etc.), rep
 - levels: list of percentages for the home range (default [95] if user doesn't specify)
 - Optionally, include animal_id if the user specifies a particular animal.
 For any other questions, answer as an expert movement ecologist in plain text (keep to 2-3 sentences).
-"""
+""".strip()
+
 FALLBACK_PROMPT = """
 You are SpatChat, a wildlife movement expert.
 If you can't map a request to a home range tool, just answer naturally.
 Keep replies under three sentences.
-"""
+""".strip()
 
 def ask_llm(chat_history, user_input):
+    # main tool-intent call
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     for m in chat_history:
         messages.append({"role": m["role"], "content": m["content"]})
     messages.append({"role": "user", "content": user_input})
-    resp = client.chat.completions.create(
-        model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
-        messages=messages,
-        temperature=0.0
-    ).choices[0].message.content
+
+    resp = llm.chat(messages, temperature=0.0, max_tokens=256, stream=False)
     try:
         call = json.loads(resp)
         return call, resp
     except Exception:
-        conv = client.chat.completions.create(
-            model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
-            messages=[{"role": "system", "content": FALLBACK_PROMPT}] + messages,
-            temperature=0.7
-        ).choices[0].message.content
+        # fallback natural reply
+        conv = llm.chat(
+            [{"role": "system", "content": FALLBACK_PROMPT}] + messages,
+            temperature=0.7,
+            max_tokens=256,
+            stream=False
+        )
         return None, conv
 
 def render_empty_map():
@@ -250,7 +410,6 @@ def handle_upload_confirm(x_col, y_col, crs_input):
 
 def parse_levels_from_text(text):
     levels = [int(val) for val in re.findall(r'\b([1-9][0-9]?|100)\b', text)]
-    # Clamp any value > 99 to 99 (for KDE, but also doesn't hurt MCP)
     levels = [min(l, 99) for l in levels]
     if not levels:
         return [95]
@@ -421,7 +580,6 @@ def handle_chat(chat_history, user_message):
     if tool and tool.get("tool") == "home_range":
         method = tool.get("method")
         levels = tool.get("levels", [95])
-        # Clamp all requests at 99 (for KDE/mcp)
         levels = [min(int(p), 99) for p in levels if 1 <= int(p) <= 100]
         if method == "mcp":
             mcp_list = levels
@@ -434,9 +592,8 @@ def handle_chat(chat_history, user_message):
     if "kde" in user_message.lower():
         kde_list = parse_levels_from_text(user_message)
 
-    # --- PATCH: Only require CSV for actual analysis ---
+    # --- Only require CSV for actual analysis ---
     if not mcp_list and not kde_list:
-        # Not a home range request; reply as LLM
         if llm_output:
             chat_history.append({"role": "user", "content": user_message})
             chat_history.append({"role": "assistant", "content": llm_output})
@@ -453,11 +610,10 @@ def handle_chat(chat_history, user_message):
     results_exist = False
     warned_about_kde_100 = False
 
-    # --- Clamp/Detect KDE 100% requests and set warning ---
+    # --- Clamp/Detect KDE 100% ---
     if kde_list:
         if 100 in kde_list or any("100" in s for s in user_message.split()):
             warned_about_kde_100 = True
-        # Clamp all values at 99
         kde_list = [min(k, 99) for k in kde_list]
 
     # --- Run Analyses ---
@@ -524,11 +680,10 @@ def handle_chat(chat_history, user_message):
                 )
                 m.add_child(mcp_layer)
 
-    # ==== KDE: Full raster + all requested contours per animal ====
+    # KDE raster + contours
     for animal in animal_ids:
         kde_percs = [p for p in requested_kde_percents if animal in kde_results and p in kde_results[animal]]
         if kde_percs:
-            # Use the KDE surface from the highest % requested
             max_perc = max(kde_percs)
             v = kde_results[animal][max_perc]
             raster_layer = folium.FeatureGroup(name=f"{animal} KDE Raster", show=True)
@@ -551,7 +706,6 @@ def handle_chat(chat_history, user_message):
                 )
             m.add_child(raster_layer)
 
-        # Add all requested KDE contours for this animal
         for percent in kde_percs:
             v = kde_results[animal][percent]
             contour_layer = folium.FeatureGroup(name=f"{animal} KDE {percent}% Contour", show=True)
@@ -593,7 +747,6 @@ def handle_chat(chat_history, user_message):
     chat_history.append({"role": "user", "content": user_message})
     chat_history.append({"role": "assistant", "content": " ".join(msg) + " Download all results below."})
 
-    # --- Always generate the ZIP with current results for DownloadButton ---
     archive_path = save_all_mcps_zip()
 
     return chat_history, gr.update(value=m._repr_html_()), gr.update(value=archive_path, visible=results_exist)
@@ -710,12 +863,15 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
             confirm_btn = gr.Button("Confirm Coordinate Settings", visible=False)
         with gr.Column(scale=3):
             map_output = gr.HTML(label="Map Preview", value=render_empty_map(), show_label=False)
-            # ========== FIX: DownloadButton only has label/visible, NO fn here ==========
             download_btn = gr.DownloadButton(
                 "📥 Download Results",
-                value=None,       # no initial file, will be set by the handler
-                visible=False     # stays hidden until results ready
+                value=None,
+                visible=False
             )
+
+    # Older Gradio compatibility: only pass max_size
+    demo.queue(max_size=16)
+
     file_input.change(
         fn=handle_upload_initial,
         inputs=file_input,
