@@ -31,6 +31,11 @@ from crs_utils import parse_crs_input
 from map_utils import render_empty_map, fit_map_to_bounds
 from estimators.mcp import add_mcps
 from estimators.kde import add_kdes
+from schema_detect import (
+    detect_and_standardize,
+    parse_metadata_command,
+    try_apply_user_mapping,
+)
 
 print("Starting SpatChat: Home Range Analysis (app.py)")
 
@@ -245,6 +250,9 @@ def handle_upload_confirm(x_col, y_col, crs_text):
     if not has_animal_id:
         df["animal_id"] = "sample"
 
+    # Auto-detect animal_id / timestamp (no layout change)
+    df, meta_msgs = detect_and_standardize(df)
+    
     set_cached_df(df)
 
     # Build preview map (same layers/layout as before)
@@ -297,17 +305,22 @@ def confirm_and_hint(x_col, y_col, crs_text, chat_history):
     then also append a short instruction message to the chatbot.
     """
     html = handle_upload_confirm(x_col, y_col, crs_text)
-    hint = {
-        "role": "assistant",
-        "content": (
-            "✅ Coordinates confirmed. You can now request home ranges. "
-            "For example: “I want 100% MCP”, “I want 95 KDE”, or “MCP 95 50”."
-        )
-    }
-    chat_history = list(chat_history)
-    chat_history.append(hint)
-    return html, chat_history
+    # pull df and try metadata detection
+    from storage import get_cached_df, set_cached_df
+    df = get_cached_df()
+    df2, meta_msgs = detect_and_standardize(df)
+    set_cached_df(df2)
 
+    hints = [
+        "✅ Coordinates confirmed. You can now request home ranges. "
+        "Examples: “I want 100% MCP”, “I want 95 KDE”, or “MCP 95 50”."
+    ]
+    hints += meta_msgs  # may be 0, 1, or 2 short lines
+
+    chat_history = list(chat_history)
+    for msg in hints:
+        chat_history.append({"role": "assistant", "content": msg})
+    return html, chat_history
 
 # --------------------------------------------------------------------------------------
 # Analysis + map assembly
@@ -366,6 +379,59 @@ def handle_chat(chat_history, user_message):
     run MCP/KDE and refresh the map. Otherwise answer briefly (via llm_utils.ask_llm).
     """
     chat_history = list(chat_history)
+
+    # Allow user to teach schema via chat ("ID column is tag_id", "no timestamp", etc.) ---
+    cmd = parse_metadata_command(user_message or "")
+    if cmd:
+        df = get_cached_df()
+        if df is None:
+            chat_history.append({"role": "assistant", "content": "Please upload a CSV first."})
+            return chat_history, gr.update(), gr.update(visible=False)
+
+        # Apply mapping and save
+        df2, msg = try_apply_user_mapping(df, cmd)
+        set_cached_df(df2)
+
+        # Reply in chat
+        chat_history.append({"role": "user", "content": user_message})
+        chat_history.append({"role": "assistant", "content": msg})
+
+        # Quick map refresh (same layout/tiles you use elsewhere)
+        m = folium.Map(location=[df2["latitude"].mean(), df2["longitude"].mean()], zoom_start=9)
+        folium.TileLayer("OpenStreetMap").add_to(m)
+        folium.TileLayer("CartoDB positron", attr='CartoDB').add_to(m)
+        folium.TileLayer(
+            tiles="https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
+            attr="OpenTopoMap", name="Topographic"
+        ).add_to(m)
+        folium.TileLayer(
+            tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+            attr="Esri", name="Satellite"
+        ).add_to(m)
+
+        pts = folium.FeatureGroup(name="Points", show=True)
+        if "animal_id" in df2.columns:
+            color_map = {aid: f"#{random.randint(0, 0xFFFFFF):06x}" for aid in df2["animal_id"].unique()}
+            for _, r in df2.iterrows():
+                color = color_map.get(r.get("animal_id"), "#3388ff")
+                folium.CircleMarker(
+                    [r["latitude"], r["longitude"]],
+                    radius=3, color=color, fill=True, fill_opacity=0.7
+                ).add_to(pts)
+        else:
+            for _, r in df2.iterrows():
+                folium.CircleMarker(
+                    [r["latitude"], r["longitude"]],
+                    radius=3, color="#3388ff", fill=True, fill_opacity=0.7
+                ).add_to(pts)
+
+        pts.add_to(m)
+        folium.LayerControl(collapsed=False).add_to(m)
+        m = fit_map_to_bounds(m, df2)
+
+        # Return same output signature (chat, map HTML, hide download)
+        return chat_history, gr.update(value=m._repr_html_()), gr.update(visible=False)
+    
     tool, llm_output = ask_llm(chat_history, user_message)
 
     mcp_list, kde_list = [], []
