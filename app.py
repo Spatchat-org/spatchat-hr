@@ -84,8 +84,19 @@ def handle_upload_initial(file):
         storage.set_cached_df(df)
         storage.set_cached_headers(list(df.columns))
     except Exception:
-        # chatbot, x, y, crs, map, x, y, crs, confirm, download
-        return [], *(gr.update(visible=False) for _ in range(8)), render_empty_map(), gr.update(visible=False)
+        # Order must match: [chatbot, x, y, crs, map, x, y, crs, confirm, download]
+        return [
+            [],                           # chatbot
+            gr.update(visible=False),     # x (first group)
+            gr.update(visible=False),     # y (first group)
+            gr.update(visible=False),     # crs (first group)
+            render_empty_map(),           # map
+            gr.update(visible=False),     # x (second group)
+            gr.update(visible=False),     # y (second group)
+            gr.update(visible=False),     # crs (second group)
+            gr.update(visible=False),     # confirm button
+            gr.update(visible=False),     # download button
+        ]
 
     cached_headers = storage.get_cached_headers()
     lower_cols = [c.lower() for c in cached_headers]
