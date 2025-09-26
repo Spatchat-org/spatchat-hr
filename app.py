@@ -291,6 +291,24 @@ def handle_upload_confirm(x_col, y_col, crs_text):
     m = fit_map_to_bounds(m, df)
     return m._repr_html_()
 
+def confirm_and_hint(x_col, y_col, crs_text, chat_history):
+    """
+    Wrapper: keep handle_upload_confirm unchanged (returns map HTML),
+    then also append a short instruction message to the chatbot.
+    """
+    html = handle_upload_confirm(x_col, y_col, crs_text)
+    hint = {
+        "role": "assistant",
+        "content": (
+            "✅ Coordinates confirmed. You can now request home ranges. "
+            "For example: “I want 100% MCP”, “I want 95 KDE”, or “MCP 95 50”."
+        )
+    }
+    chat_history = list(chat_history)
+    chat_history.append(hint)
+    return html, chat_history
+
+
 # --------------------------------------------------------------------------------------
 # Analysis + map assembly
 # --------------------------------------------------------------------------------------
@@ -618,9 +636,9 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
         ]
     )
     confirm_btn.click(
-        fn=handle_upload_confirm,
-        inputs=[x_col, y_col, crs_text],
-        outputs=map_output
+        fn=confirm_and_hint,
+        inputs=[x_col, y_col, crs_text, chatbot],
+        outputs=[map_output, chatbot]
     )
     user_input.submit(
         fn=handle_chat,
