@@ -8,6 +8,9 @@ import random
 import sys
 import zipfile
 
+import matplotlib
+matplotlib.use("Agg")
+
 import gradio as gr
 import pandas as pd
 import numpy as np
@@ -18,20 +21,13 @@ import matplotlib.pyplot as plt
 from skimage import measure
 from shapely.geometry import Polygon, MultiPolygon, mapping
 
-# ---- Local modules ----
-from storage import (
-    get_cached_df, set_cached_df,
-    get_cached_headers, set_cached_headers,
-    clear_all_results,
-    mcp_results, kde_results,
-    requested_percents, requested_kde_percents
-)
+# ---- Local modules (absolute imports; files live next to app.py) ----
+import storage
 from llm_utils import ask_llm
 from crs_utils import parse_crs_input
 from map_utils import render_empty_map, fit_map_to_bounds
 from estimators.mcp import add_mcps
 from estimators.kde import add_kdes
-
 
 print("Starting SpatChat: Home Range Analysis (app.py)")
 
@@ -77,7 +73,7 @@ def handle_upload_initial(file):
     3) If ambiguous or projected, show pickers and CRS input
     Returns exactly the same UI outputs as your previous script.
     """
-    clear_all_results()  # reset outputs/results
+    storage.clear_all_results()  # reset outputs/results
 
     os.makedirs("uploads", exist_ok=True)
     filename = os.path.join("uploads", os.path.basename(file))
@@ -85,13 +81,13 @@ def handle_upload_initial(file):
 
     try:
         df = pd.read_csv(filename)
-        set_cached_df(df)
-        set_cached_headers(list(df.columns))
+        storage.set_cached_df(df)
+        storage.set_cached_headers(list(df.columns))
     except Exception:
         # chatbot, x, y, crs, map, x, y, crs, confirm, download
         return [], *(gr.update(visible=False) for _ in range(8)), render_empty_map(), gr.update(visible=False)
 
-    cached_headers = get_cached_headers()
+    cached_headers = storage.get_cached_headers()
     lower_cols = [c.lower() for c in cached_headers]
 
     # Case A: explicit latitude/longitude column names
@@ -100,7 +96,7 @@ def handle_upload_initial(file):
         lon_col = cached_headers[lower_cols.index("longitude")]
 
         # If labeled as lat/lon but values look projected → ask for CRS
-        if looks_invalid_latlon(get_cached_df(), lat_col, lon_col):
+        if looks_invalid_latlon(storage.get_cached_df(), lat_col, lon_col):
             return [
                 {"role": "assistant", "content":
                  "CSV uploaded. Your coordinates do not appear to be latitude/longitude. "
@@ -119,7 +115,7 @@ def handle_upload_initial(file):
         ], *(gr.update(visible=False) for _ in range(3)), handle_upload_confirm("longitude", "latitude", ""), *(gr.update(visible=False) for _ in range(4)), gr.update(visible=False)
 
     # Case B: try to guess lon/lat by ranges for common x/y/easting/northing labels
-    df = get_cached_df()
+    df = storage.get_cached_df()
     x_names = ["x", "easting", "lon", "longitude"]
     y_names = ["y", "northing", "lat", "latitude"]
     found_x = next((col for col in df.columns if col.lower() in x_names), df.columns[0])
@@ -133,7 +129,7 @@ def handle_upload_initial(file):
         df = df.copy()
         df["longitude"] = df[found_x] if latlon_guess == "lonlat" else df[found_y]
         df["latitude"]  = df[found_y] if latlon_guess == "lonlat" else df[found_x]
-        set_cached_df(df)
+        storage.set_cached_df(df)
         return [
             {"role": "assistant", "content": f"CSV uploaded. {found_x}/{found_y} interpreted as latitude/longitude."}
         ], *(gr.update(visible=False) for _ in range(3)), handle_upload_confirm("longitude", "latitude", ""), *(gr.update(visible=False) for _ in range(4)), gr.update(visible=False)
@@ -156,7 +152,7 @@ def handle_upload_confirm(x_col, y_col, crs_text):
     Confirm coordinate columns and (if required) reproject to WGS84.
     Returns: HTML map (same single-output signature you already wired).
     """
-    df = get_cached_df().copy()
+    df = storage.get_cached_df().copy()
 
     if x_col not in df.columns or y_col not in df.columns:
         return "<p>Selected coordinate columns not found in data.</p>"
@@ -203,7 +199,7 @@ def handle_upload_confirm(x_col, y_col, crs_text):
     if not has_animal_id:
         df["animal_id"] = "sample"
 
-    set_cached_df(df)
+    storage.set_cached_df(df)
 
     # Build preview map (unchanged)
     m = folium.Map(location=[df["latitude"].mean(), df["longitude"].mean()], zoom_start=9, control_scale=True)
@@ -259,8 +255,8 @@ def save_all_mcps_zip():
     rows = []
 
     # MCP features
-    if any(mcp_results.values()):
-        for animal, percents in mcp_results.items():
+    if any(storage.mcp_results.values()):
+        for animal, percents in storage.mcp_results.items():
             for percent, v in percents.items():
                 features.append({
                     "type": "Feature",
@@ -277,7 +273,7 @@ def save_all_mcps_zip():
             json.dump(geojson, f)
 
     # KDE areas
-    for animal, percents in kde_results.items():
+    for animal, percents in storage.kde_results.items():
         for percent, v in percents.items():
             rows.append((animal, f"KDE-{percent}", v["area"]))
 
@@ -335,7 +331,7 @@ def handle_chat(chat_history, user_message):
         return chat_history, gr.update(), gr.update(visible=False)
 
     # Must have lon/lat prepared
-    df = get_cached_df()
+    df = storage.get_cached_df()
     if df is None or "latitude" not in df or "longitude" not in df:
         chat_history.append({"role": "assistant", "content": "CSV must be uploaded with 'latitude' and 'longitude' columns."})
         return chat_history, gr.update(), gr.update(visible=False)
@@ -352,11 +348,11 @@ def handle_chat(chat_history, user_message):
     # Run analyses (delegated to estimators/*)
     if mcp_list:
         add_mcps(df, mcp_list)
-        requested_percents.update(mcp_list)
+        storage.requested_percents.update(mcp_list)
         results_exist = True
     if kde_list:
         add_kdes(df, kde_list)
-        requested_kde_percents.update(kde_list)
+        storage.requested_kde_percents.update(kde_list)
         results_exist = True
 
     # Build map (layout unchanged)
@@ -401,10 +397,10 @@ def handle_chat(chat_history, user_message):
     paths_layer.add_to(m)
 
     # MCP layers
-    for percent in requested_percents:
+    for percent in storage.requested_percents:
         for animal in animal_ids:
-            if animal in mcp_results and percent in mcp_results[animal]:
-                v = mcp_results[animal][percent]
+            if animal in storage.mcp_results and percent in storage.mcp_results[animal]:
+                v = storage.mcp_results[animal][percent]
                 layer = folium.FeatureGroup(name=f"{animal} MCP {percent}%", show=True)
                 layer.add_child(
                     folium.Polygon(
@@ -419,11 +415,11 @@ def handle_chat(chat_history, user_message):
 
     # KDE raster + contours (same behavior; show highest raster per animal + all requested contours)
     for animal in animal_ids:
-        kde_percs = [p for p in requested_kde_percents if animal in kde_results and p in kde_results[animal]]
+        kde_percs = [p for p in storage.requested_kde_percents if animal in storage.kde_results and p in storage.kde_results[animal]]
 
         if kde_percs:
             max_perc = max(kde_percs)
-            v = kde_results[animal][max_perc]
+            v = storage.kde_results[animal][max_perc]
             raster_layer = folium.FeatureGroup(name=f"{animal} KDE Raster", show=True)
             with rasterio.open(v["geotiff"]) as src:
                 arr = src.read(1)
@@ -445,7 +441,7 @@ def handle_chat(chat_history, user_message):
             m.add_child(raster_layer)
 
         for percent in kde_percs:
-            v = kde_results[animal][percent]
+            v = storage.kde_results[animal][percent]
             contour_layer = folium.FeatureGroup(name=f"{animal} KDE {percent}% Contour", show=True)
             contour = v["contour"]
             if contour:
@@ -478,10 +474,10 @@ def handle_chat(chat_history, user_message):
 
     # Compose assistant message & ZIP
     msg = []
-    if requested_percents:
-        msg.append(f"MCP home ranges ({', '.join(str(p) for p in sorted(requested_percents))}%) calculated.")
-    if requested_kde_percents:
-        msg.append(f"KDE home ranges ({', '.join(str(p) for p in sorted(requested_kde_percents))}%) calculated (raster & contours).")
+    if storage.requested_percents:
+        msg.append(f"MCP home ranges ({', '.join(str(p) for p in sorted(storage.requested_percents))}%) calculated.")
+    if storage.requested_kde_percents:
+        msg.append(f"KDE home ranges ({', '.join(str(p) for p in sorted(storage.requested_kde_percents))}%) calculated (raster & contours).")
     if warned_about_kde_100:
         msg.append("Note: KDE at 100% is not supported and has been replaced by 99% for compatibility (as done in scientific software).")
 
