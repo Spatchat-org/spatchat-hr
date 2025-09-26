@@ -1,37 +1,41 @@
-# app.py
 import os
-import json
 import re
+import sys
+import json
 import time
 import shutil
 import random
-import sys
 import zipfile
+from typing import List
 
 import gradio as gr
 import pandas as pd
 import numpy as np
 import folium
 import rasterio
-from rasterio.transform import from_origin
-import matplotlib.pyplot as plt
-from skimage import measure
 from shapely.geometry import Polygon, MultiPolygon, mapping
+import matplotlib.pyplot as plt
 
 # ---- Local modules ----
+import storage
 from storage import (
     get_cached_df, set_cached_df,
     get_cached_headers, set_cached_headers,
     clear_all_results,
     mcp_results, kde_results,
-    requested_percents, requested_kde_percents
+    requested_percents, requested_kde_percents,
 )
 from llm_utils import ask_llm
 from crs_utils import parse_crs_input
 from map_utils import render_empty_map, fit_map_to_bounds
 from estimators.mcp import add_mcps
 from estimators.kde import add_kdes
-from schema_detect import detect_and_standardize, detect_metadata, parse_metadata_command, try_apply_user_mapping
+from schema_detect import (
+    detect_and_standardize,
+    parse_metadata_command,
+    try_apply_user_mapping,
+    ID_COL, TS_COL
+)
 
 print("Starting SpatChat: Home Range Analysis (app.py)")
 
@@ -67,11 +71,128 @@ def parse_levels_from_text(text):
         return [95]
     return sorted(set(levels))
 
+def _render_points_tracks_map(df: pd.DataFrame) -> str:
+    """
+    Build the preview map with points; draw tracks if we have a usable timestamp column.
+    (Uses the same basemap composition as your UI.)
+    """
+    has_timestamp = TS_COL in df.columns and df[TS_COL].notna().any()
+    has_animal_id = ID_COL in df.columns
+
+    m = folium.Map(
+        location=[df["latitude"].mean(), df["longitude"].mean()],
+        zoom_start=9,
+        control_scale=True
+    )
+    folium.TileLayer("OpenStreetMap").add_to(m)
+    folium.TileLayer("CartoDB positron", attr='CartoDB').add_to(m)
+    folium.TileLayer(
+        tiles="https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
+        attr="OpenTopoMap", name="Topographic"
+    ).add_to(m)
+    folium.TileLayer(
+        tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        attr="Esri", name="Satellite"
+    ).add_to(m)
+
+    points_layer = folium.FeatureGroup(name="Points", show=True)
+    lines_layer  = folium.FeatureGroup(name="Tracks", show=True)
+
+    # group by animal if available; else treat all as one animal
+    if has_animal_id:
+        animal_ids = df[ID_COL].astype(str).fillna("sample").unique()
+    else:
+        df = df.copy()
+        df[ID_COL] = "sample"
+        animal_ids = ["sample"]
+
+    color_map = {aid: f"#{random.randint(0, 0xFFFFFF):06x}" for aid in animal_ids}
+
+    for animal in animal_ids:
+        track = df[df[ID_COL] == animal]
+        color = color_map[animal]
+
+        if has_timestamp:
+            track = track.sort_values(TS_COL)
+
+        coords = list(zip(track["latitude"], track["longitude"]))
+        if has_timestamp and len(coords) > 1:
+            folium.PolyLine(coords, color=color, weight=2.5, opacity=0.8, popup=f"{animal} Track").add_to(lines_layer)
+
+        for _, row in track.iterrows():
+            label = f"{animal}"
+            if has_timestamp and pd.notna(row[TS_COL]):
+                label += f"<br>{row[TS_COL]}"
+            folium.CircleMarker(
+                location=[row["latitude"], row["longitude"]],
+                radius=3,
+                popup=label,
+                color=color,
+                fill=True,
+                fill_opacity=0.7
+            ).add_to(points_layer)
+
+    points_layer.add_to(m)
+    if has_timestamp:
+        lines_layer.add_to(m)
+    folium.LayerControl(collapsed=False).add_to(m)
+    m = fit_map_to_bounds(m, df)
+    return m._repr_html_()
+
+def _zip_outputs():
+    """Create outputs/spatchat_results.zip with MCP & KDE artifacts + areas CSV."""
+    os.makedirs("outputs", exist_ok=True)
+    features = []
+    rows = []
+
+    # MCP features
+    if any(mcp_results.values()):
+        for animal, percents in mcp_results.items():
+            for percent, v in percents.items():
+                features.append({
+                    "type": "Feature",
+                    "properties": {"animal_id": animal, "percent": percent, "area_km2": v["area"]},
+                    "geometry": mapping(v["polygon"])
+                })
+                rows.append((animal, f"MCP-{percent}", v["area"]))
+        geojson = {"type": "FeatureCollection", "features": features}
+        with open(os.path.join("outputs", "mcps_all.geojson"), "w") as f:
+            json.dump(geojson, f)
+
+    # KDE areas
+    for animal, percents in kde_results.items():
+        for percent, v in percents.items():
+            rows.append((animal, f"KDE-{percent}", v["area"]))
+
+    if rows:
+        df = pd.DataFrame(rows, columns=["animal_id", "type", "area_km2"])
+        df.to_csv(os.path.join("outputs", "home_range_areas.csv"), index=False)
+
+    archive = "outputs/spatchat_results.zip"
+    if os.path.exists(archive):
+        os.remove(archive)
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zipf:
+        for root, _, files in os.walk("outputs"):
+            for file in files:
+                if file.endswith(".zip"):
+                    continue
+                full_path = os.path.join(root, file)
+                rel_path = os.path.relpath(full_path, "outputs")
+                zipf.write(full_path, arcname=rel_path)
+    print("ZIP written:", archive)
+    return archive
+
 # --------------------------------------------------------------------------------------
-# Upload flow  (returns EXACTLY 10 outputs as wired)
-# outputs=[chatbot, x_col, y_col, crs_text, map_output, x_col, y_col, crs_text, confirm_btn, download_btn]
+# Upload flow
 # --------------------------------------------------------------------------------------
 def handle_upload_initial(file):
+    """
+    1) Cache uploaded CSV
+    2) Try to auto-detect lat/lon columns
+    3) Auto-detect ID/timestamp (schema_detect)
+    4) If ambiguous or projected, show pickers and CRS input
+    Returns exactly the same UI outputs your UI expects (10 outputs).
+    """
     clear_all_results()  # reset outputs/results
 
     os.makedirs("uploads", exist_ok=True)
@@ -82,129 +203,122 @@ def handle_upload_initial(file):
         df = pd.read_csv(filename)
         set_cached_df(df)
         set_cached_headers(list(df.columns))
-    except Exception as e:
-        print(f"[upload] failed to read CSV: {e}", file=sys.stderr)
-        # 10 outputs:
-        # chatbot, x, y, crs, map, x, y, crs, confirm, download
-        return (
-            [],  # chatbot
-            gr.update(visible=False),  # x_col
-            gr.update(visible=False),  # y_col
-            gr.update(visible=False),  # crs_text
-            render_empty_map(),        # map_output (string HTML)
-            gr.update(visible=False),  # x_col (2nd)
-            gr.update(visible=False),  # y_col (2nd)
-            gr.update(visible=False),  # crs_text (2nd)
-            gr.update(visible=False),  # confirm_btn
-            gr.update(visible=False),  # download_btn
-        )
+    except Exception as ex:
+        # chatbot, x, y, crs, map, x, y, crs, confirm, download  (10)
+        return ([],
+                gr.update(visible=False), gr.update(visible=False), gr.update(visible=False),
+                render_empty_map(),
+                gr.update(visible=False), gr.update(visible=False), gr.update(visible=False),
+                gr.update(visible=False), gr.update(visible=False))
 
     cached_headers = get_cached_headers()
     lower_cols = [c.lower() for c in cached_headers]
-    df0 = get_cached_df()
 
-    # Case A: explicit latitude/longitude column names
+    # A) explicit latitude/longitude names
     if "latitude" in lower_cols and "longitude" in lower_cols:
         lat_col = cached_headers[lower_cols.index("latitude")]
         lon_col = cached_headers[lower_cols.index("longitude")]
 
-        if looks_invalid_latlon(df0, lat_col, lon_col):
-            # Ask for CRS + show pickers
-            msg = {
-                "role": "assistant",
-                "content": ("CSV uploaded. Your coordinates do not appear to be latitude/longitude. "
+        # If labeled as lat/lon but values look projected → ask for CRS
+        raw_df = get_cached_df()
+        if looks_invalid_latlon(raw_df, lat_col, lon_col):
+            return ([
+                        {"role": "assistant", "content":
+                            "CSV uploaded. Your coordinates do not appear to be latitude/longitude. "
                             "Please specify X (easting), Y (northing), and the CRS/UTM zone below "
-                            "(e.g., 'UTM 10T' or 'EPSG:32610').")
-            }
-            return (
-                [msg],                                   # chatbot
-                gr.update(choices=cached_headers, value=lon_col, visible=True),  # x_col
-                gr.update(choices=cached_headers, value=lat_col, visible=True),  # y_col
-                gr.update(visible=True),                 # crs_text
-                render_empty_map(),                      # map_output
-                gr.update(choices=cached_headers, value=lon_col, visible=True),  # x_col (2nd)
-                gr.update(choices=cached_headers, value=lat_col, visible=True),  # y_col (2nd)
-                gr.update(visible=True),                 # crs_text (2nd)
-                gr.update(visible=True),                 # confirm_btn
-                gr.update(visible=False),                # download_btn
+                            "(e.g., 'UTM 10T' or 'EPSG:32610')."}
+                    ],
+                    gr.update(choices=cached_headers, value=lon_col, visible=True),
+                    gr.update(choices=cached_headers, value=lat_col, visible=True),
+                    gr.update(visible=True),
+                    render_empty_map(),
+                    gr.update(visible=True), gr.update(visible=True), gr.update(visible=True),
+                    gr.update(visible=True),  # confirm button
+                    gr.update(visible=False))  # download button
+
+        # Looks valid; standardize schema (ID/timestamp), render map, give examples
+        df2, meta_msgs = detect_and_standardize(raw_df)
+        set_cached_df(df2)
+
+        chat_msgs = [{
+            "role": "assistant",
+            "content": (
+                "CSV uploaded. Latitude and longitude detected. You may now create home ranges. "
+                "For example: **“I want 100% MCP”**, **“I want 95 KDE”**, or **“MCP 95 50”**.\n"
+                + ("\n".join(meta_msgs) if meta_msgs else "")
             )
+        }]
+        map_html = _render_points_tracks_map(get_cached_df())
+        # (10 outputs)
+        return (chat_msgs,
+                gr.update(visible=False), gr.update(visible=False), gr.update(visible=False),
+                map_html,
+                gr.update(visible=False), gr.update(visible=False), gr.update(visible=False),
+                gr.update(visible=False),
+                gr.update(visible=False))
 
-        # Looks valid; continue immediately with confirm (no CRS needed)
-        ok_msg = {"role": "assistant", "content": "CSV uploaded. Latitude and longitude detected. You may now create home ranges. For example: “I want 100% MCP”, “I want 95 KDE”, or “MCP 95 50”."}
-        map_html = handle_upload_confirm("longitude", "latitude", "")
-        return (
-            [ok_msg],                       # chatbot
-            gr.update(visible=False),       # x_col
-            gr.update(visible=False),       # y_col
-            gr.update(visible=False),       # crs_text
-            map_html,                       # map_output
-            gr.update(visible=False),       # x_col (2nd)
-            gr.update(visible=False),       # y_col (2nd)
-            gr.update(visible=False),       # crs_text (2nd)
-            gr.update(visible=False),       # confirm_btn
-            gr.update(visible=False),       # download_btn
-        )
-
-    # Case B: try to guess lon/lat by numeric ranges for common x/y labels
+    # B) try to guess lon/lat by ranges for common x/y/easting/northing labels
+    df = get_cached_df()
     x_names = ["x", "easting", "lon", "longitude"]
     y_names = ["y", "northing", "lat", "latitude"]
-    found_x = next((col for col in df0.columns if col.lower() in x_names), df0.columns[0])
-    found_y = next((col for col in df0.columns if col.lower() in y_names and col != found_x),
-                   df0.columns[1] if len(df0.columns) > 1 else df0.columns[0])
-    if found_x == found_y and len(df0.columns) > 1:
-        found_y = df0.columns[1 if df0.columns[0] == found_x else 0]
+    found_x = next((col for col in df.columns if col.lower() in x_names), df.columns[0])
+    found_y = next((col for col in df.columns if col.lower() in y_names and col != found_x),
+                   df.columns[1] if len(df.columns) > 1 else df.columns[0])
+    if found_x == found_y and len(df.columns) > 1:
+        found_y = df.columns[1 if df.columns[0] == found_x else 0]
 
-    latlon_guess = looks_like_latlon(df0, found_x, found_y)
+    latlon_guess = looks_like_latlon(df, found_x, found_y)
     if latlon_guess:
-        df1 = df0.copy()
-        df1["longitude"] = df1[found_x] if latlon_guess == "lonlat" else df1[found_y]
-        df1["latitude"]  = df1[found_y] if latlon_guess == "lonlat" else df1[found_x]
-        set_cached_df(df1)
-        ok_msg = {"role": "assistant", "content": f"CSV uploaded. {found_x}/{found_y} interpreted as latitude/longitude. For example: “I want 100% MCP”, “I want 95 KDE”, or “MCP 95 50”."}
-        map_html = handle_upload_confirm("longitude", "latitude", "")
-        return (
-            [ok_msg],                       # chatbot
-            gr.update(visible=False),       # x_col
-            gr.update(visible=False),       # y_col
-            gr.update(visible=False),       # crs_text
-            map_html,                       # map_output
-            gr.update(visible=False),       # x_col (2nd)
-            gr.update(visible=False),       # y_col (2nd)
-            gr.update(visible=False),       # crs_text (2nd)
-            gr.update(visible=False),       # confirm_btn
-            gr.update(visible=False),       # download_btn
-        )
+        # standardize lon/lat columns then run schema detection
+        df2 = df.copy()
+        df2["longitude"] = df2[found_x] if latlon_guess == "lonlat" else df2[found_y]
+        df2["latitude"]  = df2[found_y] if latlon_guess == "lonlat" else df2[found_x]
+        df2, meta_msgs = detect_and_standardize(df2)
+        set_cached_df(df2)
 
-    # Case C: need user to pick X/Y and provide CRS
-    need_msg = {"role": "assistant", "content": ("CSV uploaded. Your coordinates do not appear to be latitude/longitude. "
-                                                 "Please specify X (easting), Y (northing), and the CRS/UTM zone below.")}
-    return (
-        [need_msg],                                                  # chatbot
-        gr.update(choices=cached_headers, value=found_x, visible=True),  # x_col
-        gr.update(choices=cached_headers, value=found_y, visible=True),  # y_col
-        gr.update(visible=True),                                     # crs_text
-        render_empty_map(),                                          # map_output
-        gr.update(choices=cached_headers, value=found_x, visible=True),  # x_col (2nd)
-        gr.update(choices=cached_headers, value=found_y, visible=True),  # y_col (2nd)
-        gr.update(visible=True),                                     # crs_text (2nd)
-        gr.update(visible=True),                                     # confirm_btn
-        gr.update(visible=False),                                    # download_btn
-    )
+        chat_msgs = [{
+            "role": "assistant",
+            "content": (
+                f"CSV uploaded. {found_x}/{found_y} interpreted as latitude/longitude.\n"
+                "You may now create home ranges. For example: **“I want 100% MCP”**, **“I want 95 KDE”**, or **“MCP 95 50”**.\n"
+                + ("\n".join(meta_msgs) if meta_msgs else "")
+            )
+        }]
+        map_html = _render_points_tracks_map(get_cached_df())
+        return (chat_msgs,
+                gr.update(visible=False), gr.update(visible=False), gr.update(visible=False),
+                map_html,
+                gr.update(visible=False), gr.update(visible=False), gr.update(visible=False),
+                gr.update(visible=False),
+                gr.update(visible=False))
 
-# --------------------------------------------------------------------------------------
-# Confirm flow (returns ONE output: HTML string for map)
-# --------------------------------------------------------------------------------------
+    # C) need user to pick X/Y and provide CRS
+    return ([
+                {"role": "assistant", "content":
+                    "CSV uploaded. Your coordinates do not appear to be latitude/longitude. "
+                    "Please specify X (easting), Y (northing), and the CRS/UTM zone below."}
+            ],
+            gr.update(choices=cached_headers, value=found_x, visible=True),
+            gr.update(choices=cached_headers, value=found_y, visible=True),
+            gr.update(visible=True),
+            render_empty_map(),
+            gr.update(visible=True), gr.update(visible=True), gr.update(visible=True),
+            gr.update(visible=True),  # confirm button visible
+            gr.update(visible=False))  # download hidden
+
+
 def handle_upload_confirm(x_col, y_col, crs_text):
     """
     Confirm coordinate columns and (if required) reproject to WGS84.
-    Returns: HTML map (single output).
+    Then detect standard schema (ID/timestamp) and render the map.
+    Returns: HTML map (single output as wired in UI).
     """
     df = get_cached_df().copy()
 
     if x_col not in df.columns or y_col not in df.columns:
         return "<p>Selected coordinate columns not found in data.</p>"
 
-    # If already lon/lat columns by name, validate; if invalid ranges → require CRS
+    # If already lon/lat columns by name, validate; else require CRS
     if x_col.lower() in ["longitude", "lon"] and y_col.lower() in ["latitude", "lat"]:
         try:
             lon_ok = df[x_col].astype(float).between(-180, 180).all()
@@ -238,145 +352,24 @@ def handle_upload_confirm(x_col, y_col, crs_text):
         except Exception as e:
             return f"<p>Failed to convert coordinates: {e}</p>"
 
-    # Optional columns
-    has_timestamp = "timestamp" in df.columns
-    has_animal_id = "animal_id" in df.columns
-    if has_timestamp:
-        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
-    if not has_animal_id:
-        df["animal_id"] = "sample"
-
-    # Auto-detect animal_id / timestamp (no layout change)
+    # Detect & standardize ID/timestamp after coordinates are valid
     df, meta_msgs = detect_and_standardize(df)
-    
     set_cached_df(df)
 
-    # Build preview map (same layers/layout as before)
-    m = folium.Map(location=[df["latitude"].mean(), df["longitude"].mean()], zoom_start=9, control_scale=True)
-    folium.TileLayer("OpenStreetMap").add_to(m)
-    folium.TileLayer("CartoDB positron", attr='CartoDB').add_to(m)
-    folium.TileLayer(
-        tiles="https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
-        attr="OpenTopoMap", name="Topographic"
-    ).add_to(m)
-    folium.TileLayer(
-        tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-        attr="Esri", name="Satellite"
-    ).add_to(m)
-
-    points_layer = folium.FeatureGroup(name="Points", show=True)
-    lines_layer  = folium.FeatureGroup(name="Tracks", show=True)
-
-    animal_ids = df["animal_id"].unique()
-    color_map = {aid: f"#{random.randint(0, 0xFFFFFF):06x}" for aid in animal_ids}
-
-    for animal in animal_ids:
-        track = df[df["animal_id"] == animal]
-        coords = list(zip(track["latitude"], track["longitude"]))
-        color = color_map[animal]
-        if has_timestamp:
-            track = track.sort_values("timestamp")
-            folium.PolyLine(coords, color=color, weight=2.5, opacity=0.8, popup=animal).add_to(lines_layer)
-        for _, row in track.iterrows():
-            label = f"{animal}" + (f"<br>{row['timestamp']}" if has_timestamp else "")
-            folium.CircleMarker(
-                location=[row["latitude"], row["longitude"]],
-                radius=3,
-                popup=label,
-                color=color,
-                fill=True,
-                fill_opacity=0.7
-            ).add_to(points_layer)
-
-    points_layer.add_to(m)
-    if has_timestamp:
-        lines_layer.add_to(m)
-    folium.LayerControl(collapsed=False).add_to(m)
-    m = fit_map_to_bounds(m, df)
-    return m._repr_html_()
-
-def confirm_and_hint(x_col, y_col, crs_text, chat_history):
-    """
-    Wrapper: keep handle_upload_confirm unchanged (returns map HTML),
-    then also append a short instruction message to the chatbot.
-    """
-    html = handle_upload_confirm(x_col, y_col, crs_text)
-    # pull df and try metadata detection
-    from storage import get_cached_df, set_cached_df
-    df = get_cached_df()
-    df2, meta_msgs = detect_and_standardize(df)
-    set_cached_df(df2)
-
-    hints = [
-        "✅ Coordinates confirmed. You can now request home ranges. "
-        "Examples: “I want 100% MCP”, “I want 95 KDE”, or “MCP 95 50”."
-    ]
-    hints += meta_msgs  # may be 0, 1, or 2 short lines
-
-    chat_history = list(chat_history)
-    for msg in hints:
-        chat_history.append({"role": "assistant", "content": msg})
-    return html, chat_history
+    return _render_points_tracks_map(df)
 
 # --------------------------------------------------------------------------------------
-# Analysis + map assembly
+# Chat / Analysis
 # --------------------------------------------------------------------------------------
-def save_all_mcps_zip():
-    """Create outputs/spatchat_results.zip with MCP & KDE artifacts + areas CSV."""
-    os.makedirs("outputs", exist_ok=True)
-    features = []
-    rows = []
-
-    # MCP features
-    if any(mcp_results.values()):
-        for animal, percents in mcp_results.items():
-            for percent, v in percents.items():
-                features.append({
-                    "type": "Feature",
-                    "properties": {
-                        "animal_id": animal,
-                        "percent": percent,
-                        "area_km2": v["area"]
-                    },
-                    "geometry": mapping(v["polygon"])
-                })
-                rows.append((animal, f"MCP-{percent}", v["area"]))
-        geojson = {"type": "FeatureCollection", "features": features}
-        with open(os.path.join("outputs", "mcps_all.geojson"), "w") as f:
-            json.dump(geojson, f)
-
-    # KDE areas
-    for animal, percents in kde_results.items():
-        for percent, v in percents.items():
-            rows.append((animal, f"KDE-{percent}", v["area"]))
-
-    if rows:
-        df = pd.DataFrame(rows, columns=["animal_id", "type", "area_km2"])
-        df.to_csv(os.path.join("outputs", "home_range_areas.csv"), index=False)
-
-    archive = "outputs/spatchat_results.zip"
-    if os.path.exists(archive):
-        os.remove(archive)
-    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zipf:
-        for root, _, files in os.walk("outputs"):
-            for file in files:
-                if file.endswith(".zip"):
-                    continue
-                full_path = os.path.join(root, file)
-                rel_path = os.path.relpath(full_path, "outputs")
-                zipf.write(full_path, arcname=rel_path)
-    print("ZIP written:", archive)
-    return archive
-
-
 def handle_chat(chat_history, user_message):
     """
     Handles user chat. If a home range request is detected (via LLM tool or keywords),
-    run MCP/KDE and refresh the map. Otherwise answer briefly (via llm_utils.ask_llm).
+    run MCP/KDE and refresh the map. Also handles metadata commands like
+    “timestamp column is GMT_DateTime” / “no id”.
     """
     chat_history = list(chat_history)
 
-    # Allow user to teach schema via chat ("ID column is tag_id", "no timestamp", etc.) ---
+    # 1) Check if user is telling us schema info (id/timestamp mapping)
     cmd = parse_metadata_command(user_message or "")
     if cmd:
         df = get_cached_df()
@@ -384,50 +377,25 @@ def handle_chat(chat_history, user_message):
             chat_history.append({"role": "assistant", "content": "Please upload a CSV first."})
             return chat_history, gr.update(), gr.update(visible=False)
 
-        # Apply mapping and save
         df2, msg = try_apply_user_mapping(df, cmd)
         set_cached_df(df2)
 
-        # Reply in chat
-        chat_history.append({"role": "user", "content": user_message})
-        chat_history.append({"role": "assistant", "content": msg})
+        # Rebuild map to reflect tracks if timestamp just became available
+        map_html = _render_points_tracks_map(get_cached_df())
 
-        # Quick map refresh (same layout/tiles you use elsewhere)
-        m = folium.Map(location=[df2["latitude"].mean(), df2["longitude"].mean()], zoom_start=9)
-        folium.TileLayer("OpenStreetMap").add_to(m)
-        folium.TileLayer("CartoDB positron", attr='CartoDB').add_to(m)
-        folium.TileLayer(
-            tiles="https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
-            attr="OpenTopoMap", name="Topographic"
-        ).add_to(m)
-        folium.TileLayer(
-            tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-            attr="Esri", name="Satellite"
-        ).add_to(m)
-
-        pts = folium.FeatureGroup(name="Points", show=True)
-        if "animal_id" in df2.columns:
-            color_map = {aid: f"#{random.randint(0, 0xFFFFFF):06x}" for aid in df2["animal_id"].unique()}
-            for _, r in df2.iterrows():
-                color = color_map.get(r.get("animal_id"), "#3388ff")
-                folium.CircleMarker(
-                    [r["latitude"], r["longitude"]],
-                    radius=3, color=color, fill=True, fill_opacity=0.7
-                ).add_to(pts)
+        # If timestamp detected now, optionally nudge about date range
+        hints = []
+        if TS_COL in df2.columns and df2[TS_COL].notna().any():
+            tmin = pd.to_datetime(df2[TS_COL]).min()
+            tmax = pd.to_datetime(df2[TS_COL]).max()
+            hints.append(f"Detected time range: **{tmin} → {tmax}**. You can say things like “MCP 95”, “KDE 99”, or “MCP 95 50”.")
         else:
-            for _, r in df2.iterrows():
-                folium.CircleMarker(
-                    [r["latitude"], r["longitude"]],
-                    radius=3, color="#3388ff", fill=True, fill_opacity=0.7
-                ).add_to(pts)
+            hints.append("If you have times, you can say e.g. **“timestamp column is GMT_DateTime”**. Otherwise you can still run MCP/KDE.")
 
-        pts.add_to(m)
-        folium.LayerControl(collapsed=False).add_to(m)
-        m = fit_map_to_bounds(m, df2)
+        chat_history.append({"role": "assistant", "content": f"{msg}\n" + "\n".join(hints)})
+        return chat_history, gr.update(value=map_html), gr.update(visible=False)
 
-        # Return same output signature (chat, map HTML, hide download)
-        return chat_history, gr.update(value=m._repr_html_()), gr.update(visible=False)
-    
+    # 2) Normal LLM routing
     tool, llm_output = ask_llm(chat_history, user_message)
 
     mcp_list, kde_list = [], []
@@ -442,9 +410,9 @@ def handle_chat(chat_history, user_message):
             kde_list = levels
 
     # Fallback: keyword parse
-    if "mcp" in user_message.lower():
+    if "mcp" in (user_message or "").lower():
         mcp_list = parse_levels_from_text(user_message)
-    if "kde" in user_message.lower():
+    if "kde" in (user_message or "").lower():
         kde_list = parse_levels_from_text(user_message)
 
     # If not an analysis request, reply naturally (short)
@@ -453,6 +421,19 @@ def handle_chat(chat_history, user_message):
             chat_history.append({"role": "user", "content": user_message})
             chat_history.append({"role": "assistant", "content": llm_output})
             return chat_history, gr.update(), gr.update(visible=False)
+
+        # If we failed schema detection on upload, remind user they can tell us columns.
+        df = get_cached_df()
+        if df is not None:
+            nudges = []
+            if ID_COL not in df.columns:
+                nudges.append('If you have an individual column, say: **“ID column is your_id_col”** or **“no id”**.')
+            if TS_COL not in df.columns or df[TS_COL].notna().mean() < 0.5:
+                nudges.append('If you have a timestamp column, say: **“Timestamp column is your_time_col”** or **“no timestamp”**.')
+            if nudges:
+                chat_history.append({"role": "assistant", "content": " ".join(nudges)})
+                return chat_history, gr.update(), gr.update(visible=False)
+
         chat_history.append({"role": "assistant", "content": "How can I help you? Please upload a CSV for analysis or ask a question."})
         return chat_history, gr.update(), gr.update(visible=False)
 
@@ -467,7 +448,7 @@ def handle_chat(chat_history, user_message):
 
     # KDE 100% → clamp to 99% and warn (as before)
     if kde_list:
-        if 100 in kde_list or any("100" in s for s in user_message.split()):
+        if 100 in kde_list or any("100" in s for s in (user_message or "").split()):
             warned_about_kde_100 = True
         kde_list = [min(k, 99) for k in kde_list]
 
@@ -481,7 +462,7 @@ def handle_chat(chat_history, user_message):
         requested_kde_percents.update(kde_list)
         results_exist = True
 
-    # Build map (layout unchanged)
+    # Build map (points, tracks, + overlays)
     m = folium.Map(location=[df["latitude"].mean(), df["longitude"].mean()], zoom_start=9)
     folium.TileLayer("OpenStreetMap").add_to(m)
     folium.TileLayer("CartoDB positron", attr='CartoDB').add_to(m)
@@ -494,35 +475,14 @@ def handle_chat(chat_history, user_message):
         attr="Esri", name="Satellite"
     ).add_to(m)
 
-    points_layer = folium.FeatureGroup(name="Points", show=True)
-    paths_layer  = folium.FeatureGroup(name="Tracks", show=True)
-
-    animal_ids = df["animal_id"].unique()
-    color_map = {aid: f"#{random.randint(0, 0xFFFFFF):06x}" for aid in animal_ids}
-
-    # Tracks & points
-    for animal in animal_ids:
-        track = df[df["animal_id"] == animal]
-        color = color_map[animal]
-        if "timestamp" in track.columns:
-            track = track.sort_values("timestamp")
-            coords = list(zip(track["latitude"], track["longitude"]))
-            if len(coords) > 1:
-                folium.PolyLine(coords, color=color, weight=2.5, opacity=0.8, popup=f"{animal} Track").add_to(paths_layer)
-        for _, row in track.iterrows():
-            folium.CircleMarker(
-                location=[row['latitude'], row['longitude']],
-                radius=3,
-                color=color,
-                fill=True,
-                fill_opacity=0.7,
-                popup=f"{animal}"
-            ).add_to(points_layer)
-
-    points_layer.add_to(m)
-    paths_layer.add_to(m)
+    # Points & tracks again (to keep exactly your previous look)
+    # Reuse the helper to avoid drift:
+    base_html = _render_points_tracks_map(df)
 
     # MCP layers
+    animal_ids = df[ID_COL].astype(str).fillna("sample").unique() if ID_COL in df.columns else ["sample"]
+    color_map = {aid: f"#{random.randint(0, 0xFFFFFF):06x}" for aid in animal_ids}
+
     for percent in requested_percents:
         for animal in animal_ids:
             if animal in mcp_results and percent in mcp_results[animal]:
@@ -539,7 +499,7 @@ def handle_chat(chat_history, user_message):
                 )
                 m.add_child(layer)
 
-    # KDE raster + contours (show highest raster per animal + all requested contours)
+    # KDE raster + contours
     for animal in animal_ids:
         kde_percs = [p for p in requested_kde_percents if animal in kde_results and p in kde_results[animal]]
 
@@ -599,18 +559,21 @@ def handle_chat(chat_history, user_message):
     map_html = m._repr_html_()
 
     # Compose assistant message & ZIP
-    msg = []
+    msg_bits = []
     if requested_percents:
-        msg.append(f"MCP home ranges ({', '.join(str(p) for p in sorted(requested_percents))}%) calculated.")
+        msg_bits.append(f"MCP home ranges ({', '.join(str(p) for p in sorted(requested_percents))}%) calculated.")
     if requested_kde_percents:
-        msg.append(f"KDE home ranges ({', '.join(str(p) for p in sorted(requested_kde_percents))}%) calculated (raster & contours).")
+        msg_bits.append(f"KDE home ranges ({', '.join(str(p) for p in sorted(requested_kde_percents))}%) calculated (raster & contours).")
     if warned_about_kde_100:
-        msg.append("Note: KDE at 100% is not supported and has been replaced by 99% for compatibility (as done in scientific software).")
+        msg_bits.append("Note: KDE at 100% is not supported and has been replaced by 99% for compatibility (as done in scientific software).")
+
+    # Wording fix: download is to the right, below the map
+    msg_bits.append("Use the **📥 Download Results** button to the right (below the map).")
 
     chat_history.append({"role": "user", "content": user_message})
-    chat_history.append({"role": "assistant", "content": " ".join(msg) + " To download results, use the **📥 Download Results** button under the map."})
+    chat_history.append({"role": "assistant", "content": " ".join(msg_bits)})
 
-    archive_path = save_all_mcps_zip()
+    archive_path = _zip_outputs()
     return chat_history, gr.update(value=map_html), gr.update(value=archive_path, visible=True)
 
 # --------------------------------------------------------------------------------------
