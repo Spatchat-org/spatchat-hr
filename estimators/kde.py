@@ -1,6 +1,5 @@
 # estimators/kde.py
-import os
-import json
+import os, json
 import numpy as np
 import rasterio
 from rasterio.transform import from_origin
@@ -11,140 +10,110 @@ from skimage import measure
 from sklearn.neighbors import KernelDensity
 import storage  # absolute import
 
-def _utm_epsg_for_region(latitudes, longitudes):
+def _kde_core(latitudes, longitudes, percent=95, grid_size=200):
     lon0, lat0 = np.mean(longitudes), np.mean(latitudes)
-    utm_zone = int((lon0 + 180) // 6) + 1
-    return (32600 + utm_zone) if lat0 >= 0 else (32700 + utm_zone)
-
-def kde_home_range(latitudes, longitudes, percent=95, animal_id="animal", grid_size=200):
-    epsg_utm = _utm_epsg_for_region(latitudes, longitudes)
+    zone = int((lon0 + 180) // 6) + 1
+    epsg_utm = 32600 + zone if lat0 >= 0 else 32700 + zone
     to_utm = Transformer.from_crs("epsg:4326", f"epsg:{epsg_utm}", always_xy=True)
-    to_latlon = Transformer.from_crs(f"epsg:{epsg_utm}", "epsg:4326", always_xy=True)
+    to_ll  = Transformer.from_crs(f"epsg:{epsg_utm}", "epsg:4326", always_xy=True)
 
     x, y = to_utm.transform(longitudes, latitudes)
-    xy = np.vstack([x, y]).T
-    n = xy.shape[0]
+    XY = np.vstack([x, y]).T
 
-    # Silverman's rule of thumb with guards
+    n = len(XY)
     if n > 1:
-        stds = np.std(xy, axis=0, ddof=1)
-        h = np.power(4 / (3 * n), 1 / 5) * float(np.mean(stds))
-        if h < 1:
-            h = 30.0
+        stds = np.std(XY, axis=0, ddof=1)
+        h = (4/(3*n))**(1/5) * np.mean(stds)
+        if h < 1: h = 30.0
     else:
         h = 30.0
 
-    margin = 3 * h
-    xmin, xmax = x.min() - margin, x.max() + margin
-    ymin, ymax = y.min() - margin, y.max() + margin
-    x_grid = np.linspace(xmin, xmax, grid_size)
-    y_grid = np.linspace(ymin, ymax, grid_size)
-    X, Y = np.meshgrid(x_grid, y_grid)
-    grid_points = np.vstack([X.ravel(), Y.ravel()]).T
+    m = 3*h
+    xmin, xmax = x.min()-m, x.max()+m
+    ymin, ymax = y.min()-m, y.max()+m
+    gx = np.linspace(xmin, xmax, grid_size)
+    gy = np.linspace(ymin, ymax, grid_size)
+    Xg, Yg = np.meshgrid(gx, gy)
+    grid = np.vstack([Xg.ravel(), Yg.ravel()]).T
 
-    kde = KernelDensity(bandwidth=h, kernel="gaussian")
-    kde.fit(xy)
-    Z = np.exp(kde.score_samples(grid_points)).reshape(X.shape)
+    kde = KernelDensity(bandwidth=h, kernel="gaussian").fit(XY)
+    Z = np.exp(kde.score_samples(grid)).reshape(Xg.shape)
 
-    # Normalize to integrate ~1 over area
-    cell_area = (x_grid[1] - x_grid[0]) * (y_grid[1] - y_grid[0])
+    cell_area = (gx[1]-gx[0])*(gy[1]-gy[0])
     Z /= (Z.sum() * cell_area)
 
-    # Threshold for desired percent
-    Z_flat = Z.ravel()
-    idx_desc = np.argsort(Z_flat)[::-1]
-    cumsum = np.cumsum(Z_flat[idx_desc] * cell_area)
-    target = percent / 100.0
-    idx = min(np.searchsorted(cumsum, target), len(Z_flat[idx_desc]) - 1)
-    threshold = Z_flat[idx_desc][idx]
-    mask = Z >= threshold
+    Zf = Z.ravel()
+    idx = np.argsort(Zf)[::-1]
+    csum = np.cumsum(Zf[idx]*cell_area)
+    k = min(np.searchsorted(csum, percent/100.0), len(idx)-1)
+    thr = Zf[idx][k]
+    mask = Z >= thr
 
-    Z_masked = np.where(mask, Z, 0)
-    total_prob = Z_masked.sum() * cell_area
-    if total_prob > 0:
-        Z_masked /= total_prob
+    Zm = np.where(mask, Z, 0)
+    tot = Zm.sum()*cell_area
+    if tot > 0: Zm /= tot
 
-    # Raster-to-vector contour
+    # contours → polygons in UTM
     contours = measure.find_contours(mask.astype(float), 0.5)
-    polygons = []
-    for contour in contours:
-        px, py = contour[:, 1], contour[:, 0]
-        utm_xs = np.interp(px, np.arange(grid_size), x_grid)
-        utm_ys = np.interp(py, np.arange(grid_size), y_grid)
-        poly = Polygon(zip(utm_xs, utm_ys)).buffer(0)
-        if poly.is_valid and poly.area > 0:
-            polygons.append(poly)
+    polys=[]
+    for c in contours:
+        px, py = c[:,1], c[:,0]
+        xs = np.interp(px, np.arange(grid_size), gx)
+        ys = np.interp(py, np.arange(grid_size), gy)
+        p = Polygon(zip(xs, ys)).buffer(0)
+        if p.is_valid and p.area>0: polys.append(p)
+    if not polys: return None, None, None, None, None
 
-    if not polygons:
-        return None, None, None, None
-
-    mpoly_utm = unary_union(polygons)
-
-    def utm_poly_to_latlon(poly):
-        if poly.is_empty:
-            return None
+    mp_utm = unary_union(polys)
+    # back to lat/lon
+    def utm_to_ll(poly):
+        if poly.is_empty: return None
         if isinstance(poly, Polygon):
-            ext_lon, ext_lat = to_latlon.transform(*poly.exterior.xy)
-            interiors = [to_latlon.transform(*interior.xy) for interior in poly.interiors]
-            return Polygon(list(zip(ext_lon, ext_lat)),
-                           [list(zip(int_lon, int_lat)) for int_lon, int_lat in interiors])
-        elif isinstance(poly, MultiPolygon):
-            geoms = [utm_poly_to_latlon(p) for p in poly.geoms if not p.is_empty]
-            return MultiPolygon([g for g in geoms if g is not None])
+            elon, elat = to_ll.transform(*poly.exterior.xy)
+            holes = [to_ll.transform(*ring.xy) for ring in poly.interiors]
+            return Polygon(list(zip(elon, elat)),
+                           [list(zip(hlon, hlat)) for hlon, hlat in holes])
+        if isinstance(poly, MultiPolygon):
+            return MultiPolygon([utm_to_ll(p) for p in poly.geoms if not p.is_empty])
         return None
 
-    mpoly_latlon = utm_poly_to_latlon(mpoly_utm)
-    area_km2 = float(mpoly_utm.area) / 1e6
+    mp_ll = utm_to_ll(mp_utm)
+    area_km2 = mp_utm.area / 1e6
 
-    os.makedirs("outputs", exist_ok=True)
-    safe_id = str(animal_id).replace(" ", "_").replace("/", "_")
-    tiff_fp = os.path.join("outputs", f"kde_{safe_id}_{percent}.tif")
-    geojson_fp = os.path.join("outputs", f"kde_{safe_id}_{percent}.geojson")
-
-    # Save raster in EPSG:4326
-    lon_sw, lat_sw = to_latlon.transform(xmin, ymin)
-    lon_ne, lat_ne = to_latlon.transform(xmax, ymax)
-    with rasterio.open(
-        tiff_fp, "w",
-        driver="GTiff",
-        height=Z_masked.shape[0], width=Z_masked.shape[1],
-        count=1, dtype=Z_masked.dtype,
-        crs="EPSG:4326",
-        transform=from_origin(
-            lon_sw, lat_ne,
-            (lon_ne - lon_sw) / Z_masked.shape[1],
-            (lat_ne - lat_sw) / Z_masked.shape[0],
-        )
-    ) as dst:
-        dst.write(np.flipud(Z_masked), 1)
-
-    with open(geojson_fp, "w") as f:
-        json.dump(mapping(mpoly_latlon), f)
-
-    return mpoly_latlon, area_km2, tiff_fp, geojson_fp
+    return mp_ll, area_km2, Zm, (xmin, ymin, xmax, ymax), to_ll
 
 def add_kdes(df, percent_list):
+    os.makedirs("outputs", exist_ok=True)
     for percent in percent_list:
         for animal in df["animal_id"].unique():
-            if animal not in storage.kde_results:
-                storage.kde_results[animal] = {}
+            storage.kde_results.setdefault(animal, {})
             if percent in storage.kde_results[animal]:
                 continue
 
-            track = df[df["animal_id"] == animal]
-            res = kde_home_range(
-                track['latitude'].values, track['longitude'].values,
-                percent=percent, animal_id=animal
-            )
-            if res is None:
-                continue
-            mpoly, area_km2, tiff_fp, geojson_fp = res
-            if mpoly is None:
-                continue
+            trk = df[df["animal_id"]==animal]
+            poly_ll, area_km2, Zm, bbox, to_ll = _kde_core(trk['latitude'].values, trk['longitude'].values, percent)
+
+            if poly_ll is None: continue
+
+            xmin, ymin, xmax, ymax = bbox
+            lon_sw, lat_sw = to_ll.transform(xmin, ymin)
+            lon_ne, lat_ne = to_ll.transform(xmax, ymax)
+
+            safe = str(animal).replace(" ","_").replace("/","_")
+            tif = os.path.join("outputs", f"kde_{safe}_{percent}.tif")
+            with rasterio.open(
+                tif, "w", driver="GTiff",
+                height=Zm.shape[0], width=Zm.shape[1], count=1, dtype=Zm.dtype,
+                crs="EPSG:4326",
+                transform=from_origin(lon_sw, lat_ne, (lon_ne-lon_sw)/Zm.shape[1], (lat_ne-lat_sw)/Zm.shape[0])
+            ) as dst:
+                dst.write(np.flipud(Zm), 1)
+
+            gj = os.path.join("outputs", f"kde_{safe}_{percent}.geojson")
+            with open(gj, "w") as f:
+                json.dump(mapping(poly_ll), f)
 
             storage.kde_results[animal][percent] = {
-                "contour": mpoly,
-                "area": area_km2,
-                "geotiff": tiff_fp,
-                "geojson": geojson_fp,
+                "contour": poly_ll, "area": area_km2,
+                "geotiff": tif, "geojson": gj
             }
