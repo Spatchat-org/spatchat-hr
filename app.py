@@ -93,6 +93,7 @@ def handle_upload_initial(file):
     1) Cache uploaded CSV
     2) Try to auto-detect lat/lon columns
     3) If ambiguous or projected, show pickers and CRS input
+    4) Also detect animal_id / timestamp and report to the user
     Returns the same outputs ordering your UI expects.
     """
     clear_all_results()
@@ -107,17 +108,13 @@ def handle_upload_initial(file):
         set_cached_headers(list(df.columns))
     except Exception as e:
         print(f"[upload] failed to read CSV: {e}", file=sys.stderr)
-        # chatbot, x, y, crs, map, x, y, crs, confirm, download
+        # chatbot, x, y, crs, map, x, y, crs, confirm, download  (total 10)
         return [], *(gr.update(visible=False) for _ in range(4)), render_empty_map(), *(gr.update(visible=False) for _ in range(5))
-
-    # Reset pending questions for this dataset
-    for k in PENDING_QUESTIONS:
-        PENDING_QUESTIONS[k] = False
 
     cached_headers = get_cached_headers()
     lower_cols = [c.lower() for c in cached_headers]
 
-    # Case A: explicit latitude/longitude column names
+    # ---------- Branch A: explicit latitude/longitude column names ----------
     if "latitude" in lower_cols and "longitude" in lower_cols:
         lat_col = cached_headers[lower_cols.index("latitude")]
         lon_col = cached_headers[lower_cols.index("longitude")]
@@ -136,18 +133,52 @@ def handle_upload_initial(file):
             render_empty_map(), \
             *(gr.update(visible=True) for _ in range(4)), gr.update(visible=False)
 
-        # Looks valid; continue immediately with confirm (no CRS needed)
+        # Looks valid; standardize ID/timestamp too, then render map immediately
+        df0 = get_cached_df().copy()
+        # Keep the same lon/lat column names that downstream expects
+        df0["longitude"] = df0[lon_col]
+        df0["latitude"]  = df0[lat_col]
+        # Detect ID / timestamp
+        df1, meta_msgs = detect_and_standardize(df0)
+        set_cached_df(df1)
+
+        # Build the map using confirmed lon/lat
         map_html = handle_upload_confirm("longitude", "latitude", "")
+
+        # Compose a transparent message about what we detected
+        id_found  = "animal_id" in df1.columns
+        ts_found  = "timestamp" in df1.columns
+        id_note   = f"• **ID column**: `{ 'animal_id' if id_found else 'not detected' }`"
+        ts_note   = f"• **Timestamp column**: `{ 'timestamp' if ts_found else 'not detected' }`"
+        tips = []
+        if not id_found:
+            tips.append("If your data has one, say: **“ID column is <your_col>”** or **“no id”**.")
+        if not ts_found:
+            tips.append("If your data has one, say: **“Timestamp column is <your_col>”** or **“no timestamp”**.")
+
+        msg = (
+            "CSV uploaded. Latitude and longitude detected.\n\n"
+            "Detected schema:\n"
+            f"• **Longitude**: `{lon_col}`\n"
+            f"• **Latitude**: `{lat_col}`\n"
+            f"{id_note}\n"
+            f"{ts_note}\n\n"
+        )
+        if tips:
+            msg += "You can correct me in chat:\n" + "\n".join(f"  - {t}" for t in tips) + "\n\n"
+        msg += (
+            "You may now create home ranges. For example:\n"
+            "• “I want 100% MCP”\n"
+            "• “I want 95 KDE”\n"
+            "• “MCP 95 50”\n\n"
+            "_(The download button is below the preview map.)_"
+        )
+
         return [
-            {"role": "assistant", "content":
-             "CSV uploaded. Latitude and longitude detected. You may now create home ranges.\n\n"
-             "For example:\n"
-             "• “I want 100% MCP”\n"
-             "• “I want 95 KDE”\n"
-             "• “MCP 95 50”"}
+            {"role": "assistant", "content": msg}
         ], *(gr.update(visible=False) for _ in range(3)), map_html, *(gr.update(visible=False) for _ in range(4)), gr.update(visible=False)
 
-    # Case B: try to guess lon/lat by ranges for common x/y/easting/northing labels
+    # ---------- Branch B: heuristic lat/lon guess ----------
     df = get_cached_df()
     x_names = ["x", "easting", "lon", "longitude"]
     y_names = ["y", "northing", "lat", "latitude"]
@@ -159,21 +190,49 @@ def handle_upload_initial(file):
 
     latlon_guess = looks_like_latlon(df, found_x, found_y)
     if latlon_guess:
-        df = df.copy()
-        df["longitude"] = df[found_x] if latlon_guess == "lonlat" else df[found_y]
-        df["latitude"]  = df[found_y] if latlon_guess == "lonlat" else df[found_x]
-        set_cached_df(df)
+        df0 = df.copy()
+        # Assign canonical lon/lat columns
+        df0["longitude"] = df0[found_x] if latlon_guess == "lonlat" else df0[found_y]
+        df0["latitude"]  = df0[found_y] if latlon_guess == "lonlat" else df0[found_x]
+        # Detect ID / timestamp
+        df1, meta_msgs = detect_and_standardize(df0)
+        set_cached_df(df1)
+
         map_html = handle_upload_confirm("longitude", "latitude", "")
+
+        id_found = "animal_id" in df1.columns
+        ts_found = "timestamp" in df1.columns
+        id_note  = f"• **ID column**: `{ 'animal_id' if id_found else 'not detected' }`"
+        ts_note  = f"• **Timestamp column**: `{ 'timestamp' if ts_found else 'not detected' }`"
+        tips = []
+        if not id_found:
+            tips.append("If your data has one, say: **“ID column is <your_col>”** or **“no id”**.")
+        if not ts_found:
+            tips.append("If your data has one, say: **“Timestamp column is <your_col>”** or **“no timestamp”**.")
+
+        msg = (
+            f"CSV uploaded. `{found_x}`/`{found_y}` interpreted as longitude/latitude.\n\n"
+            "Detected schema:\n"
+            f"• **Longitude** source: `{found_x if latlon_guess == 'lonlat' else found_y}`\n"
+            f"• **Latitude** source: `{found_y if latlon_guess == 'lonlat' else found_x}`\n"
+            f"{id_note}\n"
+            f"{ts_note}\n\n"
+        )
+        if tips:
+            msg += "You can correct me in chat:\n" + "\n".join(f"  - {t}" for t in tips) + "\n\n"
+        msg += (
+            "You may now create home ranges. For example:\n"
+            "• “I want 100% MCP”\n"
+            "• “I want 95 KDE”\n"
+            "• “MCP 95 50”\n\n"
+            "_(The download button is below the preview map.)_"
+        )
+
         return [
-            {"role": "assistant", "content":
-             f"CSV uploaded. {found_x}/{found_y} interpreted as latitude/longitude.\n\n"
-             "For example:\n"
-             "• “I want 100% MCP”\n"
-             "• “I want 95 KDE”\n"
-             "• “MCP 95 50”"}
+            {"role": "assistant", "content": msg}
         ], *(gr.update(visible=False) for _ in range(3)), map_html, *(gr.update(visible=False) for _ in range(4)), gr.update(visible=False)
 
-    # Case C: need user to pick X/Y and provide CRS
+    # ---------- Branch C: need user to pick X/Y and provide CRS ----------
     return [
         {"role": "assistant", "content":
          "CSV uploaded. Your coordinates do not appear to be latitude/longitude. "
@@ -185,18 +244,26 @@ def handle_upload_initial(file):
     render_empty_map(), \
     *(gr.update(visible=True) for _ in range(4)), gr.update(visible=False)
 
-
 def handle_upload_confirm(x_col, y_col, crs_text):
     """
     Confirm coordinate columns and (if required) reproject to WGS84.
-    Returns: HTML map (single-output string).
-    Also runs ID/timestamp auto-detection + sets pending questions.
+    Also runs schema detection for animal_id/timestamp and records a
+    one-line detection summary for the chat.
+    Returns: HTML map (same single-output signature you already wired).
     """
-    df = get_cached_df().copy()
+    import storage  # local state
+    from crs_utils import parse_crs_input
+    from schema_detect import detect_and_standardize, ID_COL, TS_COL
+
+    df = storage.get_cached_df()
+    if df is None:
+        return "<p>No data loaded. Please upload a CSV first.</p>"
+    df = df.copy()
 
     if x_col not in df.columns or y_col not in df.columns:
         return "<p>Selected coordinate columns not found in data.</p>"
 
+    crs_note = ""
     # If already lon/lat columns by name, validate; if invalid ranges → require CRS
     if x_col.lower() in ["longitude", "lon"] and y_col.lower() in ["latitude", "lat"]:
         try:
@@ -208,6 +275,7 @@ def handle_upload_confirm(x_col, y_col, crs_text):
         if lon_ok and lat_ok:
             df["longitude"] = df[x_col]
             df["latitude"]  = df[y_col]
+            crs_note = "interpreted as WGS84 lon/lat"
         else:
             if not str(crs_text).strip():
                 return "<p>Your columns are named lon/lat but values are not geographic. Please enter a CRS (e.g., 'UTM 10T' or 'EPSG:32610').</p>"
@@ -216,6 +284,7 @@ def handle_upload_confirm(x_col, y_col, crs_text):
                 from pyproj import Transformer
                 transformer = Transformer.from_crs(epsg, 4326, always_xy=True)
                 df["longitude"], df["latitude"] = transformer.transform(df[x_col].values, df[y_col].values)
+                crs_note = f"reprojected from EPSG:{epsg} → WGS84"
             except Exception as e:
                 return f"<p>Failed to convert coordinates: {e}</p>"
 
@@ -228,29 +297,35 @@ def handle_upload_confirm(x_col, y_col, crs_text):
             from pyproj import Transformer
             transformer = Transformer.from_crs(epsg, 4326, always_xy=True)
             df["longitude"], df["latitude"] = transformer.transform(df[x_col].values, df[y_col].values)
+            crs_note = f"reprojected from EPSG:{epsg} → WGS84"
         except Exception as e:
             return f"<p>Failed to convert coordinates: {e}</p>"
 
-    # ---- ID / Timestamp auto-detect & standardize
+    # Detect & standardize metadata columns (animal_id/timestamp)
     df, meta_msgs = detect_and_standardize(df)
-    # update pending questions flags
-    PENDING_QUESTIONS["need_id"] = (ID_COL not in df.columns)
-    PENDING_QUESTIONS["need_ts"] = (TS_COL not in df.columns)
-    PENDING_QUESTIONS["id_prompted"] = False
-    PENDING_QUESTIONS["ts_prompted"] = False
 
-    # Optional columns still supported
-    has_timestamp = (TS_COL in df.columns)
-    has_animal_id = (ID_COL in df.columns)
-    if has_timestamp:
-        df[TS_COL] = pd.to_datetime(df[TS_COL], errors="coerce", utc=True)
-    if not has_animal_id:
-        # keep behavior of default single group if no ID
-        df[ID_COL] = "sample"
+    # Persist
+    storage.set_cached_df(df)
 
-    set_cached_df(df)
+    # Build a concise detection summary (for chat)
+    id_msg = TS_msg = "not detected"
+    if "animal_id" in df.columns: id_msg = "animal_id"
+    if "timestamp" in df.columns:  TS_msg = "timestamp (UTC)"
 
-    # Build preview map (unchanged layout)
+    summary = (
+        "Detected columns → "
+        f"X: `{x_col}`, Y: `{y_col}` ({crs_note}); "
+        f"ID: `{id_msg}`, time: `{TS_msg}`. "
+        "If anything's wrong, say e.g. **“ID column is tag_id”** or **“Timestamp column is GMT_DateTime”**."
+    )
+    # If schema supplied guidance (e.g., not detected), append
+    if meta_msgs:
+        summary += " " + " ".join(meta_msgs)
+
+    storage.set_detection_summary(summary)
+
+    # Build preview map (unchanged)
+    has_timestamp = "timestamp" in df.columns
     m = folium.Map(location=[df["latitude"].mean(), df["longitude"].mean()], zoom_start=9, control_scale=True)
     folium.TileLayer("OpenStreetMap").add_to(m)
     folium.TileLayer("CartoDB positron", attr='CartoDB').add_to(m)
@@ -266,20 +341,18 @@ def handle_upload_confirm(x_col, y_col, crs_text):
     points_layer = folium.FeatureGroup(name="Points", show=True)
     lines_layer  = folium.FeatureGroup(name="Tracks", show=True)
 
-    animal_ids = df[ID_COL].astype(str).unique()
+    animal_ids = df["animal_id"].unique() if "animal_id" in df.columns else ["sample"]
     color_map = {aid: f"#{random.randint(0, 0xFFFFFF):06x}" for aid in animal_ids}
 
     for animal in animal_ids:
-        track = df[df[ID_COL].astype(str) == str(animal)]
+        track = df[df["animal_id"] == animal] if "animal_id" in df.columns else df
         coords = list(zip(track["latitude"], track["longitude"]))
-        color = color_map[animal]
+        color = color_map.get(animal, "#3388ff")
         if has_timestamp:
-            track = track.sort_values(TS_COL)
-            coords = list(zip(track["latitude"], track["longitude"]))
-            if len(coords) > 1:
-                folium.PolyLine(coords, color=color, weight=2.5, opacity=0.8, popup=str(animal)).add_to(lines_layer)
+            track = track.sort_values("timestamp")
+            folium.PolyLine(coords, color=color, weight=2.5, opacity=0.8, popup=str(animal)).add_to(lines_layer)
         for _, row in track.iterrows():
-            label = f"{animal}" + (f"<br>{row[TS_COL]}" if has_timestamp and pd.notna(row[TS_COL]) else "")
+            label = f"{animal}" + (f"<br>{row['timestamp']}" if has_timestamp and pd.notna(row.get('timestamp')) else "")
             folium.CircleMarker(
                 location=[row["latitude"], row["longitude"]],
                 radius=3,
