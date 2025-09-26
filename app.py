@@ -299,7 +299,10 @@ def handle_upload_initial(file):
         lon_col = df.columns[lower_cols.index("longitude")]
         if looks_invalid_latlon(df, lat_col, lon_col):
             return [
-                {"role": "assistant", "content": "Your columns are labeled latitude and longitude, but the values do not look like geographic coordinates. Please confirm your coordinate system below."}
+                {"role": "assistant", "content":
+                 "CSV uploaded. Your coordinates do not appear to be latitude/longitude. "
+                 "Please specify X (easting), Y (northing), and the CRS/UTM zone below "
+                 "(e.g., 'UTM 10T' or 'EPSG:32610')."}
             ], \
             gr.update(choices=cached_headers, value=lon_col, visible=True), \
             gr.update(choices=cached_headers, value=lat_col, visible=True), \
@@ -332,34 +335,121 @@ def handle_upload_initial(file):
     gr.update(choices=cached_headers, value=found_y, visible=True), \
     gr.update(visible=True), render_empty_map(), *(gr.update(visible=True) for _ in range(4)), gr.update(visible=False)
 
+# --- Robust CRS parsing helpers (EPSG, UTM zone+band) ---
+def _parse_epsg_literal(s: str):
+    """
+    Accepts: 'EPSG:32610', 'epsg 32610', '32610' (a full EPSG code)
+    Returns int EPSG or None
+    """
+    s = str(s).strip()
+    m = re.search(r'(?i)\bepsg\s*:\s*(\d{4,6})\b', s)
+    if m:
+        return int(m.group(1))
+    m = re.match(r'^\s*(\d{4,6})\s*$', s)
+    if m:
+        return int(m.group(1))
+    return None
+
+def _parse_utm_any(s: str):
+    """
+    Accepts variants like:
+      'UTM 10T', 'utm zone 10N', 'zone 10 N', '10T', '10N', '10 n'
+    Uses band letters C–X (no I/O): C–M = southern, N–X = northern.
+    Returns EPSG int or None.
+    """
+    txt = str(s).strip()
+
+    patterns = [
+        r'(?i)\butm\b[^0-9]*?(\d{1,2})\s*([A-Za-z])?',   # 'UTM 10T' or 'UTM 10N'
+        r'(?i)\bzone\s*(\d{1,2})\s*([A-Za-z])?',         # 'zone 10N'
+        r'\b(\d{1,2})\s*([C-HJ-NP-Xc-hj-np-x])\b',       # '10T'
+        r'\b(\d{1,2})\s*([NnSs])\b',                     # '10N', '10S'
+    ]
+    m = None
+    for p in patterns:
+        m = re.search(p, txt)
+        if m:
+            break
+    if not m:
+        return None
+
+    zone = int(m.group(1))
+    band = (m.group(2) or '').upper()
+
+    if band in ('N', 'S'):
+        hemi = 'N' if band == 'N' else 'S'
+    elif band:
+        # Latitude band letters: N–X → north; C–M → south (I and O are not used)
+        hemi = 'N' if band >= 'N' else 'S'
+    else:
+        # No letter given: assume north (typical in NA/EU examples)
+        hemi = 'N'
+
+    return (32600 if hemi == 'N' else 32700) + zone
+
+def resolve_crs(user_text: str) -> int:
+    """
+    Try EPSG literal first; otherwise interpret UTM patterns.
+    Raises ValueError if nothing matches.
+    """
+    if not user_text:
+        raise ValueError("Empty CRS.")
+    code = _parse_epsg_literal(user_text)
+    if code:
+        return code
+    code = _parse_utm_any(user_text)
+    if code:
+        return code
+    raise ValueError(
+        "Invalid CRS. Try forms like 'EPSG:32610', '32610', 'UTM 10T', or 'zone 10N'."
+    )
+
+
+
 def parse_crs_input(crs_input):
-    crs_input = str(crs_input).strip().upper()
-    if crs_input.startswith("EPSG:"):
-        return int(crs_input.split(":")[1])
-    if crs_input.isdigit():
-        return 32600 + int(crs_input)
-    if len(crs_input) >= 2 and crs_input[:-1].isdigit() and crs_input[-1] in ("N", "S"):
-        zone = int(crs_input[:-1])
-        return 32600 + zone if crs_input[-1] == "N" else 32700 + zone
-    raise ValueError("Invalid CRS input. Use EPSG code or UTM zone like '33N'.")
+    """
+    Accepts: 'EPSG:32610', '32610', 'UTM 10T', '10T', 'zone 10N'
+    Returns EPSG:int or raises ValueError
+    """
+    return resolve_crs(crs_input)
+
 
 def handle_upload_confirm(x_col, y_col, crs_input):
     global cached_df
     df = cached_df.copy()
     if x_col not in df.columns or y_col not in df.columns:
         return "<p>Selected coordinate columns not found in data.</p>"
+
+    # Case 1: columns are already lon/lat order
     if x_col.lower() in ["longitude", "lon"] and y_col.lower() in ["latitude", "lat"]:
-        df['longitude'] = df[x_col]
-        df['latitude'] = df[y_col]
+        # Validate ranges; if invalid, we'll try CRS conversion instead
+        try:
+            lon_ok = df[x_col].astype(float).between(-180, 180).all()
+            lat_ok = df[y_col].astype(float).between(-90, 90).all()
+        except Exception:
+            lon_ok = lat_ok = False
+
+        if lon_ok and lat_ok:
+            df['longitude'] = df[x_col]
+            df['latitude']  = df[y_col]
+        else:
+            if not str(crs_input).strip():
+                return "<p>Your columns are named lon/lat but values are not geographic. Please enter a CRS (e.g., 'UTM 10T' or 'EPSG:32610').</p>"
+            try:
+                epsg = parse_crs_input(crs_input)
+                transformer = Transformer.from_crs(epsg, 4326, always_xy=True)
+                df['longitude'], df['latitude'] = transformer.transform(df[x_col].values, df[y_col].values)
+            except Exception as e:
+                return f"<p>Failed to convert coordinates: {e}</p>"
+
+    # Case 2: generic X/Y (UTM or other projected)
     else:
-        if not crs_input or crs_input.strip() == "":
-            return "<p>Please enter a CRS or UTM zone before confirming.</p>"
+        if not str(crs_input).strip():
+            return "<p>Please enter a CRS or UTM zone before confirming (e.g., 'UTM 10T' or 'EPSG:32610').</p>"
         try:
             epsg = parse_crs_input(crs_input)
             transformer = Transformer.from_crs(epsg, 4326, always_xy=True)
-            df['longitude'], df['latitude'] = transformer.transform(
-                df[x_col].values, df[y_col].values
-            )
+            df['longitude'], df['latitude'] = transformer.transform(df[x_col].values, df[y_col].values)
         except Exception as e:
             return f"<p>Failed to convert coordinates: {e}</p>"
     has_timestamp = "timestamp" in df.columns
