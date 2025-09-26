@@ -1,14 +1,12 @@
+# crs_utils.py
 import re
 
-def _parse_epsg_literal(s: str):
+def _parse_epsg_literal(s):
     s = str(s).strip()
-    m = re.search(r'(?i)\bepsg\s*:\s*(\d{4,6})\b', s)
-    if m: return int(m.group(1))
-    m = re.match(r'^\s*(\d{4,6})\s*$', s)
-    if m: return int(m.group(1))
-    return None
+    m = re.search(r'(?i)\bepsg\s*:\s*(\d{4,6})\b', s) or re.match(r'^\s*(\d{4,6})\s*$', s)
+    return int(m.group(1)) if m else None
 
-def _parse_utm_any(s: str):
+def _parse_utm_any(s):
     txt = str(s).strip()
     patterns = [
         r'(?i)\butm\b[^0-9]*?(\d{1,2})\s*([A-Za-z])?',
@@ -16,29 +14,23 @@ def _parse_utm_any(s: str):
         r'\b(\d{1,2})\s*([C-HJ-NP-Xc-hj-np-x])\b',
         r'\b(\d{1,2})\s*([NnSs])\b',
     ]
-    m = None
+    import re as _re
+    m=None
     for p in patterns:
-        m = re.search(p, txt)
+        m=_re.search(p, txt)
         if m: break
     if not m: return None
-    zone = int(m.group(1))
-    band = (m.group(2) or '').upper()
+    zone=int(m.group(1)); band=(m.group(2) or '').upper()
     if band in ('N','S'):
-        hemi = 'N' if band == 'N' else 'S'
+        hemi = 'N' if band=='N' else 'S'
     elif band:
-        hemi = 'N' if band >= 'N' else 'S'
+        hemi = 'N' if band>='N' else 'S'
     else:
         hemi = 'N'
-    return (32600 if hemi == 'N' else 32700) + zone
+    return (32600 if hemi=='N' else 32700) + zone
 
-def resolve_crs(user_text: str) -> int:
-    if not user_text:
-        raise ValueError("Empty CRS.")
-    code = _parse_epsg_literal(user_text)
-    if code: return code
-    code = _parse_utm_any(user_text)
-    if code: return code
-    raise ValueError("Invalid CRS. Try forms like 'EPSG:32610', '32610', 'UTM 10T', or 'zone 10N'.")
-
-def parse_crs_input(crs_input):
-    return resolve_crs(crs_input)
+def parse_crs_input(user_text: str) -> int:
+    code = _parse_epsg_literal(user_text) or _parse_utm_any(user_text)
+    if not code:
+        raise ValueError("Invalid CRS. Try 'EPSG:32610', '32610', 'UTM 10T', or 'zone 10N'.")
+    return code
