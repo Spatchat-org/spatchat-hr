@@ -31,11 +31,7 @@ from crs_utils import parse_crs_input
 from map_utils import render_empty_map, fit_map_to_bounds
 from estimators.mcp import add_mcps
 from estimators.kde import add_kdes
-from schema_detect import (
-    detect_and_standardize,
-    parse_metadata_command,
-    try_apply_user_mapping,
-)
+from schema_detect import detect_metadata, parse_metadata_command, try_apply_user_mapping
 
 print("Starting SpatChat: Home Range Analysis (app.py)")
 
