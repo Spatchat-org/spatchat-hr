@@ -84,6 +84,7 @@ def handle_upload_initial(file):
         storage.set_cached_df(df)
         storage.set_cached_headers(list(df.columns))
     except Exception:
+        print(f"[upload] failed to read CSV: {e}", file=sys.stderr)
         # Order must match: [chatbot, x, y, crs, map, x, y, crs, confirm, download]
         return [
             [],                           # chatbot
@@ -122,8 +123,12 @@ def handle_upload_initial(file):
 
         # Looks valid; continue immediately with confirm (no CRS needed)
         return [
-            {"role": "assistant", "content": "CSV uploaded. Latitude and longitude detected. You may now proceed to create home ranges."}
-        ], *(gr.update(visible=False) for _ in range(3)), handle_upload_confirm("longitude", "latitude", ""), *(gr.update(visible=False) for _ in range(4)), gr.update(visible=False)
+            {"role": "assistant", "content": "CSV uploaded. Latitude and longitude detected. You may now proceed to create home ranges."},
+            *[gr.update(visible=False) for _ in range(3)],
+            gr.update(value=handle_upload_confirm("longitude", "latitude", "")),   # <-- wrap as update
+            *[gr.update(visible=False) for _ in range(4)],
+            gr.update(visible=False),
+        ]
 
     # Case B: try to guess lon/lat by ranges for common x/y/easting/northing labels
     df = storage.get_cached_df()
@@ -142,8 +147,12 @@ def handle_upload_initial(file):
         df["latitude"]  = df[found_y] if latlon_guess == "lonlat" else df[found_x]
         storage.set_cached_df(df)
         return [
-            {"role": "assistant", "content": f"CSV uploaded. {found_x}/{found_y} interpreted as latitude/longitude."}
-        ], *(gr.update(visible=False) for _ in range(3)), handle_upload_confirm("longitude", "latitude", ""), *(gr.update(visible=False) for _ in range(4)), gr.update(visible=False)
+            {"role": "assistant", "content": f"CSV uploaded. {found_x}/{found_y} interpreted as latitude/longitude."},
+            *[gr.update(visible=False) for _ in range(3)],
+            gr.update(value=handle_upload_confirm("longitude", "latitude", "")),   # <-- wrap as update
+            *[gr.update(visible=False) for _ in range(4)],
+            gr.update(visible=False),
+        ]
 
     # Case C: need user to pick X/Y and provide CRS
     return [
@@ -556,7 +565,8 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
             )
             file_input = gr.File(
                 label="Upload Movement CSV (.csv or .txt only)",
-                file_types=[".csv", ".txt"]
+                file_types=[".csv", ".txt"],
+                type="filepath"
             )
             x_col = gr.Dropdown(label="X column", choices=[], visible=False)
             y_col = gr.Dropdown(label="Y column", choices=[], visible=False)
