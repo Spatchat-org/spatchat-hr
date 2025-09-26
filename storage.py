@@ -98,3 +98,13 @@ def save_all_mcps_zip():
 
     print("ZIP written:", archive)
     return archive
+
+# --- transient detection summary for chat ---
+last_detection_summary = ""
+
+def set_detection_summary(text: str):
+    global last_detection_summary
+    last_detection_summary = text or ""
+
+def get_detection_summary() -> str:
+    return last_detection_summary
