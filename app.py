@@ -129,7 +129,7 @@ def handle_upload_initial(file):
             )
 
         # Looks valid; continue immediately with confirm (no CRS needed)
-        ok_msg = {"role": "assistant", "content": "CSV uploaded. Latitude and longitude detected. You may now proceed to create home ranges."}
+        ok_msg = {"role": "assistant", "content": "CSV uploaded. Latitude and longitude detected. You may now create home ranges. For example: “I want 100% MCP”, “I want 95 KDE”, or “MCP 95 50”."}
         map_html = handle_upload_confirm("longitude", "latitude", "")
         return (
             [ok_msg],                       # chatbot
@@ -159,7 +159,7 @@ def handle_upload_initial(file):
         df1["longitude"] = df1[found_x] if latlon_guess == "lonlat" else df1[found_y]
         df1["latitude"]  = df1[found_y] if latlon_guess == "lonlat" else df1[found_x]
         set_cached_df(df1)
-        ok_msg = {"role": "assistant", "content": f"CSV uploaded. {found_x}/{found_y} interpreted as latitude/longitude."}
+        ok_msg = {"role": "assistant", "content": f"CSV uploaded. {found_x}/{found_y} interpreted as latitude/longitude. For example: “I want 100% MCP”, “I want 95 KDE”, or “MCP 95 50”."}
         map_html = handle_upload_confirm("longitude", "latitude", "")
         return (
             [ok_msg],                       # chatbot
@@ -528,7 +528,7 @@ def handle_chat(chat_history, user_message):
         msg.append("Note: KDE at 100% is not supported and has been replaced by 99% for compatibility (as done in scientific software).")
 
     chat_history.append({"role": "user", "content": user_message})
-    chat_history.append({"role": "assistant", "content": " ".join(msg) + " Download all results below."})
+    chat_history.append({"role": "assistant", "content": " ".join(msg) + " Use the **📥 Download Results** button under the map."})
 
     archive_path = save_all_mcps_zip()
     return chat_history, gr.update(value=map_html), gr.update(value=archive_path, visible=True)
