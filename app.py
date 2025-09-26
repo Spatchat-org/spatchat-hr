@@ -8,9 +8,6 @@ import random
 import sys
 import zipfile
 
-import matplotlib
-matplotlib.use("Agg")
-
 import gradio as gr
 import pandas as pd
 import numpy as np
@@ -21,8 +18,14 @@ import matplotlib.pyplot as plt
 from skimage import measure
 from shapely.geometry import Polygon, MultiPolygon, mapping
 
-# ---- Local modules (absolute imports; files live next to app.py) ----
-import storage
+# ---- Local modules ----
+from storage import (
+    get_cached_df, set_cached_df,
+    get_cached_headers, set_cached_headers,
+    clear_all_results,
+    mcp_results, kde_results,
+    requested_percents, requested_kde_percents
+)
 from llm_utils import ask_llm
 from crs_utils import parse_crs_input
 from map_utils import render_empty_map, fit_map_to_bounds
@@ -64,16 +67,11 @@ def parse_levels_from_text(text):
     return sorted(set(levels))
 
 # --------------------------------------------------------------------------------------
-# Upload flow
+# Upload flow  (returns EXACTLY 10 outputs as wired)
+# outputs=[chatbot, x_col, y_col, crs_text, map_output, x_col, y_col, crs_text, confirm_btn, download_btn]
 # --------------------------------------------------------------------------------------
 def handle_upload_initial(file):
-    """
-    1) Cache uploaded CSV
-    2) Try to auto-detect lat/lon columns
-    3) If ambiguous or projected, show pickers and CRS input
-    Returns exactly the same UI outputs as your previous script.
-    """
-    storage.clear_all_results()  # reset outputs/results
+    clear_all_results()  # reset outputs/results
 
     os.makedirs("uploads", exist_ok=True)
     filename = os.path.join("uploads", os.path.basename(file))
@@ -81,98 +79,126 @@ def handle_upload_initial(file):
 
     try:
         df = pd.read_csv(filename)
-        storage.set_cached_df(df)
-        storage.set_cached_headers(list(df.columns))
-    except Exception:
+        set_cached_df(df)
+        set_cached_headers(list(df.columns))
+    except Exception as e:
         print(f"[upload] failed to read CSV: {e}", file=sys.stderr)
-        # Order must match: [chatbot, x, y, crs, map, x, y, crs, confirm, download]
-        return [
-            [],                           # chatbot
-            gr.update(visible=False),     # x (first group)
-            gr.update(visible=False),     # y (first group)
-            gr.update(visible=False),     # crs (first group)
-            render_empty_map(),           # map
-            gr.update(visible=False),     # x (second group)
-            gr.update(visible=False),     # y (second group)
-            gr.update(visible=False),     # crs (second group)
-            gr.update(visible=False),     # confirm button
-            gr.update(visible=False),     # download button
-        ]
+        # 10 outputs:
+        # chatbot, x, y, crs, map, x, y, crs, confirm, download
+        return (
+            [],  # chatbot
+            gr.update(visible=False),  # x_col
+            gr.update(visible=False),  # y_col
+            gr.update(visible=False),  # crs_text
+            render_empty_map(),        # map_output (string HTML)
+            gr.update(visible=False),  # x_col (2nd)
+            gr.update(visible=False),  # y_col (2nd)
+            gr.update(visible=False),  # crs_text (2nd)
+            gr.update(visible=False),  # confirm_btn
+            gr.update(visible=False),  # download_btn
+        )
 
-    cached_headers = storage.get_cached_headers()
+    cached_headers = get_cached_headers()
     lower_cols = [c.lower() for c in cached_headers]
+    df0 = get_cached_df()
 
     # Case A: explicit latitude/longitude column names
     if "latitude" in lower_cols and "longitude" in lower_cols:
         lat_col = cached_headers[lower_cols.index("latitude")]
         lon_col = cached_headers[lower_cols.index("longitude")]
 
-        # If labeled as lat/lon but values look projected → ask for CRS
-        if looks_invalid_latlon(storage.get_cached_df(), lat_col, lon_col):
-            return [
-                {"role": "assistant", "content":
-                 "CSV uploaded. Your coordinates do not appear to be latitude/longitude. "
-                 "Please specify X (easting), Y (northing), and the CRS/UTM zone below "
-                 "(e.g., 'UTM 10T' or 'EPSG:32610')."}
-            ], \
-            gr.update(choices=cached_headers, value=lon_col, visible=True), \
-            gr.update(choices=cached_headers, value=lat_col, visible=True), \
-            gr.update(visible=True), \
-            render_empty_map(), \
-            *(gr.update(visible=True) for _ in range(4)), gr.update(visible=False)
+        if looks_invalid_latlon(df0, lat_col, lon_col):
+            # Ask for CRS + show pickers
+            msg = {
+                "role": "assistant",
+                "content": ("CSV uploaded. Your coordinates do not appear to be latitude/longitude. "
+                            "Please specify X (easting), Y (northing), and the CRS/UTM zone below "
+                            "(e.g., 'UTM 10T' or 'EPSG:32610').")
+            }
+            return (
+                [msg],                                   # chatbot
+                gr.update(choices=cached_headers, value=lon_col, visible=True),  # x_col
+                gr.update(choices=cached_headers, value=lat_col, visible=True),  # y_col
+                gr.update(visible=True),                 # crs_text
+                render_empty_map(),                      # map_output
+                gr.update(choices=cached_headers, value=lon_col, visible=True),  # x_col (2nd)
+                gr.update(choices=cached_headers, value=lat_col, visible=True),  # y_col (2nd)
+                gr.update(visible=True),                 # crs_text (2nd)
+                gr.update(visible=True),                 # confirm_btn
+                gr.update(visible=False),                # download_btn
+            )
 
         # Looks valid; continue immediately with confirm (no CRS needed)
-        return [
-            {"role": "assistant", "content": "CSV uploaded. Latitude and longitude detected. You may now proceed to create home ranges."},
-            *[gr.update(visible=False) for _ in range(3)],
-            gr.update(value=handle_upload_confirm("longitude", "latitude", "")),   # <-- wrap as update
-            *[gr.update(visible=False) for _ in range(4)],
-            gr.update(visible=False),
-        ]
+        ok_msg = {"role": "assistant", "content": "CSV uploaded. Latitude and longitude detected. You may now proceed to create home ranges."}
+        map_html = handle_upload_confirm("longitude", "latitude", "")
+        return (
+            [ok_msg],                       # chatbot
+            gr.update(visible=False),       # x_col
+            gr.update(visible=False),       # y_col
+            gr.update(visible=False),       # crs_text
+            map_html,                       # map_output
+            gr.update(visible=False),       # x_col (2nd)
+            gr.update(visible=False),       # y_col (2nd)
+            gr.update(visible=False),       # crs_text (2nd)
+            gr.update(visible=False),       # confirm_btn
+            gr.update(visible=False),       # download_btn
+        )
 
-    # Case B: try to guess lon/lat by ranges for common x/y/easting/northing labels
-    df = storage.get_cached_df()
+    # Case B: try to guess lon/lat by numeric ranges for common x/y labels
     x_names = ["x", "easting", "lon", "longitude"]
     y_names = ["y", "northing", "lat", "latitude"]
-    found_x = next((col for col in df.columns if col.lower() in x_names), df.columns[0])
-    found_y = next((col for col in df.columns if col.lower() in y_names and col != found_x),
-                   df.columns[1] if len(df.columns) > 1 else df.columns[0])
-    if found_x == found_y and len(df.columns) > 1:
-        found_y = df.columns[1 if df.columns[0] == found_x else 0]
+    found_x = next((col for col in df0.columns if col.lower() in x_names), df0.columns[0])
+    found_y = next((col for col in df0.columns if col.lower() in y_names and col != found_x),
+                   df0.columns[1] if len(df0.columns) > 1 else df0.columns[0])
+    if found_x == found_y and len(df0.columns) > 1:
+        found_y = df0.columns[1 if df0.columns[0] == found_x else 0]
 
-    latlon_guess = looks_like_latlon(df, found_x, found_y)
+    latlon_guess = looks_like_latlon(df0, found_x, found_y)
     if latlon_guess:
-        df = df.copy()
-        df["longitude"] = df[found_x] if latlon_guess == "lonlat" else df[found_y]
-        df["latitude"]  = df[found_y] if latlon_guess == "lonlat" else df[found_x]
-        storage.set_cached_df(df)
-        return [
-            {"role": "assistant", "content": f"CSV uploaded. {found_x}/{found_y} interpreted as latitude/longitude."},
-            *[gr.update(visible=False) for _ in range(3)],
-            gr.update(value=handle_upload_confirm("longitude", "latitude", "")),   # <-- wrap as update
-            *[gr.update(visible=False) for _ in range(4)],
-            gr.update(visible=False),
-        ]
+        df1 = df0.copy()
+        df1["longitude"] = df1[found_x] if latlon_guess == "lonlat" else df1[found_y]
+        df1["latitude"]  = df1[found_y] if latlon_guess == "lonlat" else df1[found_x]
+        set_cached_df(df1)
+        ok_msg = {"role": "assistant", "content": f"CSV uploaded. {found_x}/{found_y} interpreted as latitude/longitude."}
+        map_html = handle_upload_confirm("longitude", "latitude", "")
+        return (
+            [ok_msg],                       # chatbot
+            gr.update(visible=False),       # x_col
+            gr.update(visible=False),       # y_col
+            gr.update(visible=False),       # crs_text
+            map_html,                       # map_output
+            gr.update(visible=False),       # x_col (2nd)
+            gr.update(visible=False),       # y_col (2nd)
+            gr.update(visible=False),       # crs_text (2nd)
+            gr.update(visible=False),       # confirm_btn
+            gr.update(visible=False),       # download_btn
+        )
 
     # Case C: need user to pick X/Y and provide CRS
-    return [
-        {"role": "assistant", "content":
-         "CSV uploaded. Your coordinates do not appear to be latitude/longitude. "
-         "Please specify X (easting), Y (northing), and the CRS/UTM zone below."}
-    ], \
-    gr.update(choices=cached_headers, value=found_x, visible=True), \
-    gr.update(choices=cached_headers, value=found_y, visible=True), \
-    gr.update(visible=True), \
-    render_empty_map(), \
-    *(gr.update(visible=True) for _ in range(4)), gr.update(visible=False)
+    need_msg = {"role": "assistant", "content": ("CSV uploaded. Your coordinates do not appear to be latitude/longitude. "
+                                                 "Please specify X (easting), Y (northing), and the CRS/UTM zone below.")}
+    return (
+        [need_msg],                                                  # chatbot
+        gr.update(choices=cached_headers, value=found_x, visible=True),  # x_col
+        gr.update(choices=cached_headers, value=found_y, visible=True),  # y_col
+        gr.update(visible=True),                                     # crs_text
+        render_empty_map(),                                          # map_output
+        gr.update(choices=cached_headers, value=found_x, visible=True),  # x_col (2nd)
+        gr.update(choices=cached_headers, value=found_y, visible=True),  # y_col (2nd)
+        gr.update(visible=True),                                     # crs_text (2nd)
+        gr.update(visible=True),                                     # confirm_btn
+        gr.update(visible=False),                                    # download_btn
+    )
 
-
+# --------------------------------------------------------------------------------------
+# Confirm flow (returns ONE output: HTML string for map)
+# --------------------------------------------------------------------------------------
 def handle_upload_confirm(x_col, y_col, crs_text):
     """
     Confirm coordinate columns and (if required) reproject to WGS84.
-    Returns: HTML map (same single-output signature you already wired).
+    Returns: HTML map (single output).
     """
-    df = storage.get_cached_df().copy()
+    df = get_cached_df().copy()
 
     if x_col not in df.columns or y_col not in df.columns:
         return "<p>Selected coordinate columns not found in data.</p>"
@@ -219,9 +245,9 @@ def handle_upload_confirm(x_col, y_col, crs_text):
     if not has_animal_id:
         df["animal_id"] = "sample"
 
-    storage.set_cached_df(df)
+    set_cached_df(df)
 
-    # Build preview map (unchanged)
+    # Build preview map (same layers/layout as before)
     m = folium.Map(location=[df["latitude"].mean(), df["longitude"].mean()], zoom_start=9, control_scale=True)
     folium.TileLayer("OpenStreetMap").add_to(m)
     folium.TileLayer("CartoDB positron", attr='CartoDB').add_to(m)
@@ -275,8 +301,8 @@ def save_all_mcps_zip():
     rows = []
 
     # MCP features
-    if any(storage.mcp_results.values()):
-        for animal, percents in storage.mcp_results.items():
+    if any(mcp_results.values()):
+        for animal, percents in mcp_results.items():
             for percent, v in percents.items():
                 features.append({
                     "type": "Feature",
@@ -293,7 +319,7 @@ def save_all_mcps_zip():
             json.dump(geojson, f)
 
     # KDE areas
-    for animal, percents in storage.kde_results.items():
+    for animal, percents in kde_results.items():
         for percent, v in percents.items():
             rows.append((animal, f"KDE-{percent}", v["area"]))
 
@@ -351,7 +377,7 @@ def handle_chat(chat_history, user_message):
         return chat_history, gr.update(), gr.update(visible=False)
 
     # Must have lon/lat prepared
-    df = storage.get_cached_df()
+    df = get_cached_df()
     if df is None or "latitude" not in df or "longitude" not in df:
         chat_history.append({"role": "assistant", "content": "CSV must be uploaded with 'latitude' and 'longitude' columns."})
         return chat_history, gr.update(), gr.update(visible=False)
@@ -368,11 +394,11 @@ def handle_chat(chat_history, user_message):
     # Run analyses (delegated to estimators/*)
     if mcp_list:
         add_mcps(df, mcp_list)
-        storage.requested_percents.update(mcp_list)
+        requested_percents.update(mcp_list)
         results_exist = True
     if kde_list:
         add_kdes(df, kde_list)
-        storage.requested_kde_percents.update(kde_list)
+        requested_kde_percents.update(kde_list)
         results_exist = True
 
     # Build map (layout unchanged)
@@ -417,10 +443,10 @@ def handle_chat(chat_history, user_message):
     paths_layer.add_to(m)
 
     # MCP layers
-    for percent in storage.requested_percents:
+    for percent in requested_percents:
         for animal in animal_ids:
-            if animal in storage.mcp_results and percent in storage.mcp_results[animal]:
-                v = storage.mcp_results[animal][percent]
+            if animal in mcp_results and percent in mcp_results[animal]:
+                v = mcp_results[animal][percent]
                 layer = folium.FeatureGroup(name=f"{animal} MCP {percent}%", show=True)
                 layer.add_child(
                     folium.Polygon(
@@ -433,13 +459,13 @@ def handle_chat(chat_history, user_message):
                 )
                 m.add_child(layer)
 
-    # KDE raster + contours (same behavior; show highest raster per animal + all requested contours)
+    # KDE raster + contours (show highest raster per animal + all requested contours)
     for animal in animal_ids:
-        kde_percs = [p for p in storage.requested_kde_percents if animal in storage.kde_results and p in storage.kde_results[animal]]
+        kde_percs = [p for p in requested_kde_percents if animal in kde_results and p in kde_results[animal]]
 
         if kde_percs:
             max_perc = max(kde_percs)
-            v = storage.kde_results[animal][max_perc]
+            v = kde_results[animal][max_perc]
             raster_layer = folium.FeatureGroup(name=f"{animal} KDE Raster", show=True)
             with rasterio.open(v["geotiff"]) as src:
                 arr = src.read(1)
@@ -461,7 +487,7 @@ def handle_chat(chat_history, user_message):
             m.add_child(raster_layer)
 
         for percent in kde_percs:
-            v = storage.kde_results[animal][percent]
+            v = kde_results[animal][percent]
             contour_layer = folium.FeatureGroup(name=f"{animal} KDE {percent}% Contour", show=True)
             contour = v["contour"]
             if contour:
@@ -494,10 +520,10 @@ def handle_chat(chat_history, user_message):
 
     # Compose assistant message & ZIP
     msg = []
-    if storage.requested_percents:
-        msg.append(f"MCP home ranges ({', '.join(str(p) for p in sorted(storage.requested_percents))}%) calculated.")
-    if storage.requested_kde_percents:
-        msg.append(f"KDE home ranges ({', '.join(str(p) for p in sorted(storage.requested_kde_percents))}%) calculated (raster & contours).")
+    if requested_percents:
+        msg.append(f"MCP home ranges ({', '.join(str(p) for p in sorted(requested_percents))}%) calculated.")
+    if requested_kde_percents:
+        msg.append(f"KDE home ranges ({', '.join(str(p) for p in sorted(requested_kde_percents))}%) calculated (raster & contours).")
     if warned_about_kde_100:
         msg.append("Note: KDE at 100% is not supported and has been replaced by 99% for compatibility (as done in scientific software).")
 
@@ -508,7 +534,7 @@ def handle_chat(chat_history, user_message):
     return chat_history, gr.update(value=map_html), gr.update(value=archive_path, visible=True)
 
 # --------------------------------------------------------------------------------------
-# UI (unchanged layout)
+# UI (layout unchanged)
 # --------------------------------------------------------------------------------------
 with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     gr.Image(
@@ -565,8 +591,7 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
             )
             file_input = gr.File(
                 label="Upload Movement CSV (.csv or .txt only)",
-                file_types=[".csv", ".txt"],
-                type="filepath"
+                file_types=[".csv", ".txt"]
             )
             x_col = gr.Dropdown(label="X column", choices=[], visible=False)
             y_col = gr.Dropdown(label="Y column", choices=[], visible=False)
@@ -583,7 +608,7 @@ with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     # Queue (unchanged)
     demo.queue(max_size=16)
 
-    # Wire events (same outputs ordering as your previous script)
+    # Wire events (same outputs ordering)
     file_input.change(
         fn=handle_upload_initial,
         inputs=file_input,
