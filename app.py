@@ -528,7 +528,7 @@ def handle_chat(chat_history, user_message):
         msg.append("Note: KDE at 100% is not supported and has been replaced by 99% for compatibility (as done in scientific software).")
 
     chat_history.append({"role": "user", "content": user_message})
-    chat_history.append({"role": "assistant", "content": " ".join(msg) + " Use the **📥 Download Results** button under the map."})
+    chat_history.append({"role": "assistant", "content": " ".join(msg) + " To download results, use the **📥 Download Results** button under the map."})
 
     archive_path = save_all_mcps_zip()
     return chat_history, gr.update(value=map_html), gr.update(value=archive_path, visible=True)
