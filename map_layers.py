@@ -171,8 +171,7 @@ def make_kde_layers(kde_results, requested_kde_percents, animal_ids, color_map):
 
 def make_locoh_layers(locoh_result: dict, animal_ids, color_map, name_prefix: str = "LoCoH"):
     """
-    Return a list of FeatureGroups for LoCoH isopleths per animal.
-    Expects GeoJSON-like geometries in WGS84 (lon/lat).
+    Envelopes at requested isopleths (e.g., 50/95). Visible by default.
     """
     import folium
 
@@ -185,10 +184,9 @@ def make_locoh_layers(locoh_result: dict, animal_ids, color_map, name_prefix: st
 
         for item in data.get("isopleths", []):
             iso = int(item["isopleth"])
-            gj_geom = item["geometry"]  # geometry dict
+            gj_geom = item["geometry"]
             area_km2 = float(item.get("area_sq_km", 0.0))
 
-            # Wrap geometry into a Feature with properties for the tooltip
             feature = {
                 "type": "Feature",
                 "properties": {
@@ -199,7 +197,7 @@ def make_locoh_layers(locoh_result: dict, animal_ids, color_map, name_prefix: st
                 "geometry": gj_geom,
             }
 
-            layer = folium.FeatureGroup(name=f"{animal} {name_prefix} {iso}%", show=True)
+            layer = folium.FeatureGroup(name=f"{animal} {name_prefix} {iso}%", show=True)  # ← show by default
             folium.GeoJson(
                 data=feature,
                 name=f"{name_prefix} {iso}% — {animal}",
@@ -218,6 +216,76 @@ def make_locoh_layers(locoh_result: dict, animal_ids, color_map, name_prefix: st
 
     return layers
 
+def make_locoh_facets_layers(locoh_result: dict, animal_ids, color_map, name_prefix: str = "LoCoH facets"):
+    """
+    Render individual local convex hulls ("facets") colored by cumulative percent (red→yellow).
+    Visible by default.
+    """
+    import folium
+
+    # bins & palette (deep red → pale yellow)
+    bins = [20, 40, 60, 80, 95, 100]
+    palette = {
+        20: "#d7301f",
+        40: "#ef6548",
+        60: "#fc8d59",
+        80: "#fdbb84",
+        95: "#fdd49e",
+        100:"#fee8c8",
+    }
+    def color_for(pct: int) -> str:
+        for b in bins:
+            if pct <= b:
+                return palette[b]
+        return palette[100]
+
+    layers = []
+    animals_dict = locoh_result.get("animals", {}) if locoh_result else {}
+    for animal in animal_ids:
+        data = animals_dict.get(str(animal)) or animals_dict.get(animal)
+        if not data:
+            continue
+        facets = data.get("facets", [])
+        if not facets:
+            continue
+
+        # One GeoJSON per animal for performance
+        features = []
+        for f in facets:
+            pct = int(f.get("cum_percent", 100))
+            area = float(f.get("area_sq_km", 0.0))
+            features.append({
+                "type": "Feature",
+                "properties": {
+                    "animal_id": str(animal),
+                    "cum_percent": pct,
+                    "area_km2": round(area, 3),
+                    "_fill": color_for(pct),
+                },
+                "geometry": f["geometry"],
+            })
+
+        fc = {"type": "FeatureCollection", "features": features}
+        layer = folium.FeatureGroup(name=f"{animal} {name_prefix}", show=True)  # ← show by default
+        folium.GeoJson(
+            data=fc,
+            name=f"{name_prefix} — {animal}",
+            style_function=lambda feat: {
+                "fillOpacity": 0.6,
+                "weight": 1,
+                "color": "#222222",
+                "fillColor": feat["properties"]["_fill"],
+            },
+            tooltip=folium.GeoJsonTooltip(
+                fields=["animal_id", "cum_percent", "area_km2"],
+                aliases=["Animal", "Cum. %", "Hull area (km²)"],
+                localize=True,
+            ),
+        ).add_to(layer)
+
+        layers.append(layer)
+
+    return layers
 
 # ---------- Composition entrypoint ----------
 
@@ -245,9 +313,13 @@ def build_results_map(df, mcp_results, kde_results, requested_percents, requeste
 
     # LoCoH (optional)
     if locoh_result is not None:
+        # Envelopes (50/95 or custom)
         for layer in make_locoh_layers(locoh_result, animal_ids, color_map, name_prefix="LoCoH"):
             layer.add_to(m)
-
+        # Facets (tiny hulls, red→yellow)
+        for layer in make_locoh_facets_layers(locoh_result, animal_ids, color_map, name_prefix="LoCoH facets"):
+            layer.add_to(m)
+    
     folium.LayerControl(collapsed=False).add_to(m)
     m = fit_map_to_bounds(m, df)
     return m._repr_html_()
