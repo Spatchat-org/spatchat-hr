@@ -106,7 +106,7 @@ def compute_dbbmm(
 
         # Project to meters for calculations
         xs, ys = to_eq.transform(sub["lon"].values, sub["lat"].values)
-        ts = sub["timestamp"].view("int64").values / 1e9  # seconds since epoch
+        ts = sub["timestamp"].astype("int64").to_numpy() / 1e9
         # Guard against duplicated timestamps
         dt = np.diff(ts)
         valid = dt > 0
