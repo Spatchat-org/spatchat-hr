@@ -365,8 +365,15 @@ def make_dbbmm_layers(dbbmm_results: dict, animal_ids, color_map, name_prefix="d
 
 # ---------- Composition entrypoint ----------
 
-def build_results_map(df, mcp_results, kde_results, requested_percents, requested_kde_percents,
-                      locoh_result=None):
+def build_results_map(
+    df,
+    mcp_results,
+    kde_results,
+    requested_percents,
+    requested_kde_percents,
+    locoh_result=None,
+    dbbmm_result=None
+):
     """Full map: points/tracks + estimator-specific layers (MCP, KDE, LoCoH)."""
     m = _base_map(df["latitude"].mean(), df["longitude"].mean(), control_scale=False, zoom=9)
 
@@ -404,3 +411,4 @@ def build_results_map(df, mcp_results, kde_results, requested_percents, requeste
     folium.LayerControl(collapsed=False).add_to(m)
     m = fit_map_to_bounds(m, df)
     return m._repr_html_()
+
