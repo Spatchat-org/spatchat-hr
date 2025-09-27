@@ -1,4 +1,4 @@
-# app.py
+# app.py (handlers only, no UI)
 import os
 import json
 import re
@@ -11,10 +11,6 @@ import zipfile
 import gradio as gr
 import pandas as pd
 import numpy as np
-import folium
-import rasterio
-import matplotlib.pyplot as plt
-from shapely.geometry import Polygon, MultiPolygon, mapping
 
 # ---- Local modules ----
 from storage import (
@@ -28,7 +24,7 @@ from storage import (
 )
 from llm_utils import ask_llm
 from crs_utils import parse_crs_input
-from map_utils import render_empty_map, fit_map_to_bounds
+from map_utils import render_empty_map
 from coords_utils import looks_like_latlon, looks_invalid_latlon, parse_levels_from_text
 from map_layers import build_preview_map, build_results_map
 from schema_detect import (
@@ -37,6 +33,7 @@ from schema_detect import (
     try_apply_user_mapping,
     ID_COL, TS_COL
 )
+from dataset_context import build_dataset_context
 
 print("Starting SpatChat: Home Range Analysis (app.py)")
 
@@ -48,6 +45,13 @@ PENDING_QUESTIONS = {
     "id_prompted": False,
 }
 
+def _current_dataset_context():
+    df = get_cached_df()
+    try:
+        return build_dataset_context(df)
+    except Exception:
+        return {"empty": True}
+
 # --------------------------------------------------------------------------------------
 # Upload flow
 # --------------------------------------------------------------------------------------
@@ -57,7 +61,10 @@ def handle_upload_initial(file):
     2) Try to auto-detect lat/lon columns
     3) If ambiguous or projected, show pickers and CRS input
     4) Also detect animal_id / timestamp and report to the user
-    Returns the same outputs ordering your UI expects.
+
+    Returns (for your existing UI wiring):
+      [chatbot, x_col, y_col, crs_text, map_output,
+       x_col, y_col, crs_text, confirm_btn, download_btn]
     """
     clear_all_results()
 
@@ -119,8 +126,15 @@ def handle_upload_initial(file):
         df0 = get_cached_df().copy()
         df0["longitude"] = df0[lon_col]
         df0["latitude"]  = df0[lat_col]
-        df1, meta_msgs = detect_and_standardize(df0)
+        df1, _ = detect_and_standardize(df0)
         set_cached_df(df1)
+
+        # Optional: store dataset brief for LLM Q&A
+        try:
+            brief = build_dataset_context(df1)
+            set_dataset_brief(brief)
+        except Exception as e:
+            print(f"[dataset_brief] skipped: {e}", file=sys.stderr)
 
         map_html = build_preview_map(df1)
 
@@ -179,8 +193,15 @@ def handle_upload_initial(file):
         df0 = df.copy()
         df0["longitude"] = df0[found_x] if latlon_guess == "lonlat" else df0[found_y]
         df0["latitude"]  = df0[found_y] if latlon_guess == "lonlat" else df0[found_x]
-        df1, meta_msgs = detect_and_standardize(df0)
+        df1, _ = detect_and_standardize(df0)
         set_cached_df(df1)
+
+        # Optional: store dataset brief for LLM Q&A
+        try:
+            brief = build_dataset_context(df1)
+            set_dataset_brief(brief)
+        except Exception as e:
+            print(f"[dataset_brief] skipped: {e}", file=sys.stderr)
 
         map_html = build_preview_map(df1)
 
@@ -291,12 +312,17 @@ def handle_upload_confirm(x_col, y_col, crs_text):
 
     # Detect & standardize metadata columns (animal_id/timestamp)
     df, _ = detect_and_standardize(df)
-
     set_cached_df(df)
-    brief = build_dataset_brief(df)
-    set_dataset_brief(brief)
+
+    # Optional: dataset brief for LLM Q&A
+    try:
+        brief = build_dataset_context(df)
+        set_dataset_brief(brief)
+    except Exception as e:
+        print(f"[dataset_brief] skipped: {e}", file=sys.stderr)
 
     return build_preview_map(df)
+
 
 def confirm_and_hint(x_col, y_col, crs_text, chat_history):
     """
@@ -305,7 +331,7 @@ def confirm_and_hint(x_col, y_col, crs_text, chat_history):
     """
     map_html = handle_upload_confirm(x_col, y_col, crs_text)
 
-    # Don’t spam if handle_upload_confirm returned an error string HTML
+    # If handle_upload_confirm returned an error snippet, we still add guidance.
     guidance = (
         "Settings confirmed. You may now create home ranges. For example:\n"
         "• “I want 100% MCP”\n"
@@ -359,8 +385,8 @@ def handle_chat(chat_history, user_message):
         chat_history.append({"role": "assistant", "content": msg + (" " + " ".join(follow) if follow else "")})
         return chat_history, gr.update(), gr.update(visible=False)
 
-    # Normal tool-intent call
-    tool, llm_output = ask_llm(chat_history, user_message, context=get_dataset_brief())
+    # Normal tool-intent call (with dataset context)
+    tool, llm_output = ask_llm(chat_history, user_message, context=_current_dataset_context())
 
     mcp_list, kde_list = [], []
     if tool and tool.get("tool") == "home_range":
@@ -412,7 +438,7 @@ def handle_chat(chat_history, user_message):
     results_exist = False
     warned_about_kde_100 = False
 
-    # KDE 100% → clamp to 99% and warn (as before)
+    # KDE 100% → clamp to 99% and warn
     if kde_list:
         if 100 in kde_list or any("100" in s for s in user_message.split()):
             warned_about_kde_100 = True
@@ -457,7 +483,6 @@ def handle_chat(chat_history, user_message):
 
     archive_path = save_all_mcps_zip()
     return chat_history, gr.update(value=map_html), gr.update(value=archive_path, visible=True)
-
 
 # --------------------------------------------------------------------------------------
 # UI (layout unchanged)
