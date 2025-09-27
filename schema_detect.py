@@ -31,7 +31,7 @@ def _best_match_by_name(columns: List[str], candidates: List[str]) -> Optional[s
 
 def _is_timestamp_series(s: pd.Series, min_ok: float = 0.8) -> bool:
     try:
-        parsed = pd.to_datetime(s, errors="coerce", utc=True, infer_datetime_format=True)
+        parsed = pd.to_datetime(s, errors="coerce", utc=True)
         frac = parsed.notna().mean()
         return frac >= min_ok
     except Exception:
@@ -73,7 +73,7 @@ def detect_timestamp_column(df: pd.DataFrame) -> Optional[str]:
     best_score = 0.0
     for c in cols:
         try:
-            parsed = pd.to_datetime(df[c], errors="coerce", utc=True, infer_datetime_format=True)
+            parsed = pd.to_datetime(df[c], errors="coerce", utc=True)
             score = parsed.notna().mean()
             if score > best_score and score >= 0.8:
                 best = c
@@ -110,7 +110,7 @@ def detect_and_standardize(df: pd.DataFrame):
     if ts_col:
         if ts_col != TS_COL:
             out[TS_COL] = out[ts_col]
-        out[TS_COL] = pd.to_datetime(out[TS_COL], errors="coerce", utc=True, infer_datetime_format=True)
+        out[TS_COL] = pd.to_datetime(out[TS_COL], errors="coerce", utc=True)
         if out[TS_COL].notna().mean() < 0.8:
             out.drop(columns=[TS_COL], errors="ignore", inplace=True)
             ts_col = None
@@ -234,7 +234,7 @@ def try_apply_user_mapping(df: pd.DataFrame, cmd: dict):
         col = cmd["timestamp"]
         if col not in out.columns:
             return out, f"I couldn't find a column named **{col}**."
-        ts = pd.to_datetime(out[col], errors="coerce", utc=True, infer_datetime_format=True)
+        ts = pd.to_datetime(out[col], errors="coerce", utc=True)
         out[TS_COL] = ts
         if out[TS_COL].notna().mean() < 0.5:
             out.drop(columns=[TS_COL], inplace=True, errors="ignore")
