@@ -1,4 +1,4 @@
-# app.py (handlers only, no UI)
+# app.py
 import os
 import json
 import re
@@ -35,12 +35,18 @@ from schema_detect import (
 )
 from dataset_context import build_dataset_context
 
-print("Starting SpatChat: Home Range Analysis (app.py)")
+# NEW: LoCoH estimator
+from estimators.locoh import compute_locoh, LoCoHParams
+
+print("Starting SpatChat: Home Range Analysis (app.py) — handlers only")
 
 import numpy as _np
 import pandas as _pd
 from datetime import datetime as _dt, date as _date
 
+# --------------------------------------------------------------------------------------
+# Utilities
+# --------------------------------------------------------------------------------------
 def _json_safe(x):
     if isinstance(x, (_np.integer,)):
         return int(x)
@@ -57,6 +63,25 @@ def _json_safe(x):
     if isinstance(x, dict):
         return {k: _json_safe(v) for k, v in x.items()}
     return x
+
+def parse_kv_tokens(text: str) -> dict:
+    """Parse simple 'k=10 a=1500 isopleths=50,95' style tokens from a user message."""
+    toks = {}
+    for tok in text.replace(",", " ").split():
+        if "=" in tok:
+            k, v = tok.split("=", 1)
+            toks[k.strip().lower()] = v.strip().strip(",")
+    return toks
+
+def _summarize_locoh(res: dict, params: LoCoHParams) -> str:
+    lines = [f"LoCoH ({params.method}) complete. Areas (km²):"]
+    got = False
+    for animal_id, data in (res.get("animals") or {}).items():
+        parts = [f"{it['isopleth']}%: {it['area_sq_km']:.2f}" for it in data.get("isopleths", [])]
+        if parts:
+            got = True
+            lines.append(f"- {animal_id}: " + ", ".join(parts))
+    return "\n".join(lines) if got else "LoCoH finished, but no polygons were built."
 
 # Track per-upload “pending questions” we may ask the user (id/timestamp)
 PENDING_QUESTIONS = {
@@ -120,6 +145,18 @@ def handle_upload_initial(file):
     cached_headers = get_cached_headers()
     lower_cols = [c.lower() for c in cached_headers]
 
+    # ---------- detect heuristic lon/lat candidates (from your coords_utils) ----------
+    # Try an early guess just like your prior flow if not explicit 'latitude' 'longitude'
+    found_x = found_y = None
+    latlon_guess = None
+    try:
+        # looks_like_latlon returns ('lonlat' or 'latlon', x_col, y_col) when confident; else None
+        guess = looks_like_latlon(get_cached_df(), cached_headers)
+        if isinstance(guess, tuple) and len(guess) == 3:
+            latlon_guess, found_x, found_y = guess
+    except Exception:
+        pass
+
     # ---------- Branch A: explicit latitude/longitude column names ----------
     if "latitude" in lower_cols and "longitude" in lower_cols:
         lat_col = cached_headers[lower_cols.index("latitude")]
@@ -143,7 +180,6 @@ def handle_upload_initial(file):
                 gr.update(visible=False),                                        # download
             ]
 
-        # Looks valid; standardize ID/timestamp too, then render map immediately
         # Looks valid; standardize ID/timestamp too, then render map immediately
         df0 = get_cached_df().copy()
         df0["longitude"] = df0[lon_col]
@@ -187,6 +223,7 @@ def handle_upload_initial(file):
             "• “I want 100% MCP”\n"
             "• “I want 95 KDE”\n"
             "• “MCP 95 50”\n"
+            "• “locoh k=10 isopleths=50,95”\n"
         )
 
         return [
@@ -204,6 +241,7 @@ def handle_upload_initial(file):
 
     # ---------- Branch B: heuristic lat/lon guess ----------
     if latlon_guess:
+        df = get_cached_df()
         df0 = df.copy()
         df0["longitude"] = df0[found_x] if latlon_guess == "lonlat" else df0[found_y]
         df0["latitude"]  = df0[found_y] if latlon_guess == "lonlat" else df0[found_x]
@@ -245,6 +283,7 @@ def handle_upload_initial(file):
             "• “I want 100% MCP”\n"
             "• “I want 95 KDE”\n"
             "• “MCP 95 50”\n"
+            "• “locoh k=10 isopleths=50,95”\n"
         )
 
         return [
@@ -351,19 +390,20 @@ def confirm_and_hint(x_col, y_col, crs_text, chat_history):
         "Settings confirmed. You may now create home ranges. For example:\n"
         "• “I want 100% MCP”\n"
         "• “I want 95 KDE”\n"
-        "• “MCP 95 50”"
+        "• “MCP 95 50”\n"
+        "• “locoh k=10 isopleths=50,95”"
     )
     chat = list(chat_history)
     chat.append({"role": "assistant", "content": guidance})
     return map_html, chat
 
 # --------------------------------------------------------------------------------------
-# Analysis + chat handler
+# Analysis + chat handler (MCP / KDE / LoCoH)
 # --------------------------------------------------------------------------------------
 def handle_chat(chat_history, user_message):
     """
     Handles user chat. If a home range request is detected (via LLM tool or keywords),
-    run MCP/KDE and refresh the map. Otherwise answer briefly (via llm_utils.ask_llm).
+    run MCP/KDE/LoCoH and refresh the map. Otherwise answer briefly (via llm_utils.ask_llm).
     Also processes user commands like:
       - "timestamp column is <name>"
       - "id column is <name>"
@@ -406,6 +446,10 @@ def handle_chat(chat_history, user_message):
     tool, llm_output = ask_llm(chat_history, user_message, context=context_safe)
 
     mcp_list, kde_list = [], []
+    locoh_requested = False
+    locoh_params = None
+
+    # Tool intent → fill lists (extensible to LoCoH if your tool emits it)
     if tool and tool.get("tool") == "home_range":
         method = tool.get("method")
         levels = tool.get("levels", [95])
@@ -414,16 +458,56 @@ def handle_chat(chat_history, user_message):
             mcp_list = levels
         elif method == "kde":
             kde_list = levels
+        elif method == "locoh":
+            # If your LLM tool can emit LoCoH, map here; otherwise the keyword branch below catches it.
+            locoh_requested = True
+            locoh_params = LoCoHParams(method=tool.get("locoh_method", "k"),
+                                       k=int(tool.get("k", 10)),
+                                       a=tool.get("a"),
+                                       r=tool.get("r"),
+                                       isopleths=tuple(levels or (50, 95)))
 
-    # Fallback: keyword parse
-    if "mcp" in user_message.lower():
+    # Fallback: keyword parse (MCP/KDE existing)
+    msg_lower = user_message.lower()
+    if "mcp" in msg_lower:
         mcp_list = parse_levels_from_text(user_message)
-    if "kde" in user_message.lower():
+    if "kde" in msg_lower:
         kde_list = parse_levels_from_text(user_message)
 
+    # NEW: keyword parse for LoCoH (supports 'k', 'a', 'r' + isopleths)
+    if "locoh" in msg_lower:
+        locoh_requested = True
+        toks = parse_kv_tokens(user_message)
+        method = "k"
+        k = int(toks.get("k", 10))
+        a = toks.get("a")
+        r = toks.get("r")
+        if a is not None:
+            method = "a"
+            try:
+                a = float(a)
+            except Exception:
+                a = None
+        elif r is not None:
+            method = "r"
+            try:
+                r = float(r)
+            except Exception:
+                r = None
+        # Isopleths: either explicit via token or parsed like "50 95"
+        iso_str = toks.get("isopleths")
+        if iso_str:
+            iso = tuple(int(s) for s in re.split(r"[,\s]+", iso_str) if s)
+        else:
+            # reuse existing parse_levels; clamp to 1..99 (LoCoH 100% is allowed in principle,
+            # but visually it often overlaps fully; we keep 50/95 as sensible defaults)
+            parsed = parse_levels_from_text(user_message)
+            iso = tuple(parsed) if parsed else (50, 95)
+        locoh_params = LoCoHParams(method=method, k=k, a=a, r=r, isopleths=iso)
+
     # If not an analysis request, reply naturally (short)
-    if not mcp_list and not kde_list:
-        # If we still owe the user clarifications about missing columns, prompt once
+    if not mcp_list and not kde_list and not locoh_requested:
+        # If we still owe clarifications about missing columns, prompt once
         if PENDING_QUESTIONS["need_id"] and not PENDING_QUESTIONS["id_prompted"]:
             chat_history.append({"role": "assistant", "content":
                                  "I couldn’t detect an individual ID column. If your data has one, say: “ID column is tag_id”. "
@@ -454,6 +538,8 @@ def handle_chat(chat_history, user_message):
 
     results_exist = False
     warned_about_kde_100 = False
+    locoh_result = None
+    locoh_error = None
 
     # KDE 100% → clamp to 99% and warn
     if kde_list:
@@ -473,36 +559,59 @@ def handle_chat(chat_history, user_message):
         requested_kde_percents.update(kde_list)
         results_exist = True
 
-    # Build map (points/tracks + MCP/KDE)
+    # LoCoH
+    if locoh_requested:
+        try:
+            # estimator expects lon/lat column names (x_col/y_col) passed explicitly
+            df_locoh = df.rename(columns={"longitude": "lon", "latitude": "lat"})
+            locoh_result = compute_locoh(
+                df=df_locoh,
+                id_col="animal_id",
+                x_col="lon",
+                y_col="lat",
+                params=locoh_params or LoCoHParams()
+            )
+            results_exist = True
+        except Exception as e:
+            locoh_error = str(e)
+
+    # Build map (points/tracks + MCP/KDE + LoCoH if present)
     map_html = build_results_map(
         df,
         mcp_results=mcp_results,
         kde_results=kde_results,
         requested_percents=requested_percents,
-        requested_kde_percents=requested_kde_percents
+        requested_kde_percents=requested_kde_percents,
+        locoh_result=locoh_result
     )
 
     # Compose assistant message & ZIP
-    msg = []
+    msgs = []
     if requested_percents:
-        msg.append(f"MCP home ranges ({', '.join(str(p) for p in sorted(requested_percents))}%) calculated.")
+        msgs.append(f"MCP home ranges ({', '.join(str(p) for p in sorted(requested_percents))}%) calculated.")
     if requested_kde_percents:
-        msg.append(f"KDE home ranges ({', '.join(str(p) for p in sorted(requested_kde_percents))}%) calculated (raster & contours).")
+        msgs.append(f"KDE home ranges ({', '.join(str(p) for p in sorted(requested_kde_percents))}%) calculated (raster & contours).")
     if warned_about_kde_100:
-        msg.append("Note: KDE at 100% is not supported and has been replaced by 99% for compatibility (as done in scientific software).")
+        msgs.append("Note: KDE at 100% is not supported and has been replaced by 99% for compatibility (as done in scientific software).")
+    if locoh_result:
+        msgs.append(_summarize_locoh(locoh_result, locoh_params or LoCoHParams()))
+    if locoh_error:
+        msgs.append(f"LoCoH error: {locoh_error}")
 
     # Only mention the download button if we actually produced results
     if results_exist:
-        msg.append("_The download button is below the preview map._")
+        msgs.append("_The download button is below the preview map._")
 
     chat_history.append({"role": "user", "content": user_message})
-    chat_history.append({"role": "assistant", "content": " ".join(msg)})
+    chat_history.append({"role": "assistant", "content": " ".join(msgs) if msgs else "Done."})
 
+    # NOTE: current bundler exports MCP assets. To include LoCoH in the zip, add the
+    # suggested snippet to storage.zip builder (see earlier guidance).
     archive_path = save_all_mcps_zip()
-    return chat_history, gr.update(value=map_html), gr.update(value=archive_path, visible=True)
+    return chat_history, gr.update(value=map_html), gr.update(value=archive_path, visible=results_exist)
 
 # --------------------------------------------------------------------------------------
-# UI (layout unchanged)
+# UI
 # --------------------------------------------------------------------------------------
 with gr.Blocks(title="SpatChat: Home Range Analysis") as demo:
     gr.Image(
