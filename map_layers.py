@@ -60,39 +60,14 @@ def build_preview_map(df):
     m = fit_map_to_bounds(m, df)
     return m._repr_html_()
 
-def make_locoh_layers(locoh_result: dict, name_prefix: str = "LoCoH"):
-    """Return a list of (layer_name, folium.GeoJson) for 50/95 isopleths per animal."""
-    import folium
+# ---------- New small builders ----------
 
-    layers = []
-    for animal_id, data in locoh_result.get("animals", {}).items():
-        for item in data.get("isopleths", []):
-            iso = item["isopleth"]
-            gj = item["geometry"]
-            layer_name = f"{name_prefix} {iso}% — {animal_id}"
-            g = folium.GeoJson(
-                gj,
-                name=layer_name,
-                tooltip=folium.GeoJsonTooltip(fields=[], aliases=[], labels=False),
-                style_function=lambda _feat, iso=iso: {
-                    "fillOpacity": 0.25 if iso == 95 else 0.45,
-                    "weight": 2,
-                },
-                show=(iso in (50,)),
-            )
-            layers.append((layer_name, g))
-    return layers
-
-def build_results_map(df, mcp_results, kde_results, requested_percents, requested_kde_percents):
-    """Full map: points/tracks + MCP polygons + KDE raster/contours."""
-    m = _base_map(df["latitude"].mean(), df["longitude"].mean(), control_scale=False, zoom=9)
-
-    # points/tracks
+def make_points_tracks_layers(df, color_map):
+    """Return (points_layer, tracks_layer) FeatureGroups."""
     points_layer = folium.FeatureGroup(name="Points", show=True)
-    paths_layer  = folium.FeatureGroup(name="Tracks", show=True)
+    tracks_layer = folium.FeatureGroup(name="Tracks", show=True)
     has_timestamp = "timestamp" in df.columns
     animal_ids = df["animal_id"].unique() if "animal_id" in df.columns else ["sample"]
-    color_map = {aid: f"#{random.randint(0, 0xFFFFFF):06x}" for aid in animal_ids}
 
     for animal in animal_ids:
         track = df[df["animal_id"] == animal] if "animal_id" in df.columns else df
@@ -101,7 +76,7 @@ def build_results_map(df, mcp_results, kde_results, requested_percents, requeste
             track = track.sort_values("timestamp")
             coords = list(zip(track["latitude"], track["longitude"]))
             if len(coords) > 1:
-                folium.PolyLine(coords, color=color, weight=2.5, opacity=0.8, popup=f"{animal} Track").add_to(paths_layer)
+                folium.PolyLine(coords, color=color, weight=2.5, opacity=0.8, popup=f"{animal} Track").add_to(tracks_layer)
         for _, row in track.iterrows():
             folium.CircleMarker(
                 location=[row['latitude'], row['longitude']],
@@ -111,16 +86,17 @@ def build_results_map(df, mcp_results, kde_results, requested_percents, requeste
                 fill_opacity=0.7,
                 popup=f"{animal}"
             ).add_to(points_layer)
+    return points_layer, tracks_layer
 
-    points_layer.add_to(m)
-    paths_layer.add_to(m)
-
-    # MCP layers
+def make_mcp_layers(mcp_results, requested_percents, animal_ids, color_map):
+    """Return a list of FeatureGroups for MCP polygons."""
+    layers = []
     for percent in requested_percents:
         for animal in animal_ids:
             if animal in mcp_results and percent in mcp_results[animal]:
                 v = mcp_results[animal][percent]
                 layer = folium.FeatureGroup(name=f"{animal} MCP {percent}%", show=True)
+                # v["polygon"] is shapely poly with (lon,lat). Folium expects (lat,lon)
                 layer.add_child(
                     folium.Polygon(
                         locations=[(lat, lon) for lon, lat in np.array(v["polygon"].exterior.coords)],
@@ -130,9 +106,12 @@ def build_results_map(df, mcp_results, kde_results, requested_percents, requeste
                         popup=f"{animal} MCP {percent}%"
                     )
                 )
-                m.add_child(layer)
+                layers.append(layer)
+    return layers
 
-    # KDE raster + contours
+def make_kde_layers(kde_results, requested_kde_percents, animal_ids, color_map):
+    """Return a list of FeatureGroups for KDE raster + contour layers."""
+    layers = []
     for animal in animal_ids:
         kde_percs = [p for p in requested_kde_percents if animal in kde_results and p in kde_results[animal]]
 
@@ -158,7 +137,7 @@ def build_results_map(df, mcp_results, kde_results, requested_percents, requeste
                         interactive=False
                     )
                 )
-            m.add_child(raster_layer)
+            layers.append(raster_layer)
 
         # Contours: all requested %
         for percent in kde_percs:
@@ -187,7 +166,65 @@ def build_results_map(df, mcp_results, kde_results, requested_percents, requeste
                             popup=f"{animal} KDE {percent}% Contour"
                         )
                     )
-            m.add_child(contour_layer)
+            layers.append(contour_layer)
+    return layers
+
+def make_locoh_layers(locoh_result: dict, animal_ids, color_map, name_prefix: str = "LoCoH"):
+    """
+    Return a list of FeatureGroups for LoCoH isopleths per animal.
+    Expects GeoJSON-like geometries in WGS84 (lon/lat).
+    """
+    layers = []
+    animals_dict = locoh_result.get("animals", {}) if locoh_result else {}
+    for animal in animal_ids:
+        data = animals_dict.get(str(animal)) or animals_dict.get(animal)
+        if not data:
+            continue
+        for item in data.get("isopleths", []):
+            iso = item["isopleth"]
+            gj = item["geometry"]  # GeoJSON mapping
+            layer = folium.FeatureGroup(name=f"{animal} {name_prefix} {iso}%", show=(iso in (50,)))
+            folium.GeoJson(
+                gj,
+                name=f"{name_prefix} {iso}% — {animal}",
+                style_function=lambda _feat, iso=iso, animal=animal: {
+                    "fillOpacity": 0.45 if iso != 95 else 0.25,
+                    "weight": 2,
+                    "color": color_map[animal],
+                },
+                tooltip=folium.GeoJsonTooltip(fields=[], aliases=[], labels=False),
+            ).add_to(layer)
+            layers.append(layer)
+    return layers
+
+# ---------- Composition entrypoint ----------
+
+def build_results_map(df, mcp_results, kde_results, requested_percents, requested_kde_percents,
+                      locoh_result=None):
+    """Full map: points/tracks + estimator-specific layers (MCP, KDE, LoCoH)."""
+    m = _base_map(df["latitude"].mean(), df["longitude"].mean(), control_scale=False, zoom=9)
+
+    # Consistent colors per animal across all estimators
+    animal_ids = df["animal_id"].unique() if "animal_id" in df.columns else ["sample"]
+    color_map = {aid: f"#{random.randint(0, 0xFFFFFF):06x}" for aid in animal_ids}
+
+    # Points/Tracks
+    points_layer, tracks_layer = make_points_tracks_layers(df, color_map)
+    points_layer.add_to(m)
+    tracks_layer.add_to(m)
+
+    # MCP
+    for layer in make_mcp_layers(mcp_results or {}, requested_percents or [], animal_ids, color_map):
+        layer.add_to(m)
+
+    # KDE
+    for layer in make_kde_layers(kde_results or {}, requested_kde_percents or [], animal_ids, color_map):
+        layer.add_to(m)
+
+    # LoCoH (optional)
+    if locoh_result is not None:
+        for layer in make_locoh_layers(locoh_result, animal_ids, color_map, name_prefix="LoCoH"):
+            layer.add_to(m)
 
     folium.LayerControl(collapsed=False).add_to(m)
     m = fit_map_to_bounds(m, df)
