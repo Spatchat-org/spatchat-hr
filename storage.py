@@ -32,9 +32,12 @@ kde_results = {}
 # }
 locoh_results = None  # or dict
 
+dbbmm_results = {}              # {animal_id: {"geotiff": str, "isopleths": [{percent, area_sq_km, geometry}]}}
+
 # requested sets (kept for UI and summaries)
 requested_percents = set()        # MCP
 requested_kde_percents = set()    # KDE
+requested_dbbmm_percents = set()  # dBBMM
 
 # Cached dataset and headers
 cached_df = None
@@ -73,13 +76,20 @@ def set_detection_summary(text: str):
 def get_detection_summary() -> str:
     return last_detection_summary
 
-# ---- LoCoH accessors (used by app.py optionally) ----
 def get_locoh_results():
     return locoh_results
 
 def set_locoh_results(res: dict | None):
     global locoh_results
     locoh_results = res
+
+def get_dbbmm_results():
+    return dbbmm_results
+
+def set_dbbmm_results(res: dict | None):
+    dbbmm_results.clear()
+    if isinstance(res, dict):
+        dbbmm_results.update(res)
 
 # ---- Lifecycle helpers ----
 def clear_all_results():
@@ -89,8 +99,10 @@ def clear_all_results():
     """
     mcp_results.clear()
     kde_results.clear()
+    dbbmm_results.clear()
     requested_percents.clear()
     requested_kde_percents.clear()
+    requested_dbbmm_percents.clear()
 
     global locoh_results
     locoh_results = None
@@ -227,6 +239,38 @@ def _write_locoh_assets(rows_accum: list[tuple], outdir: str):
         fc_fac_all = {"type": "FeatureCollection", "features": facets_features}
         with open(os.path.join(outdir, "locoh_facets.geojson"), "w") as f:
             json.dump(fc_fac_all, f)
+
+def _write_dbbmm_assets(rows_accum: list[tuple], outdir: str):
+    index = {"animals": {}}
+    any_bb = False
+    for animal, data in dbbmm_results.items():
+        any_bb = True
+        index["animals"][animal] = {
+            "geotiff": data.get("geotiff"),
+            "isopleths": [],
+        }
+        for item in data.get("isopleths", []):
+            p = int(item.get("percent"))
+            area = float(item.get("area_sq_km", 0.0))
+            rows_accum.append((animal, f"dBBMM-{p}", area))
+            index["animals"][animal]["isopleths"].append({
+                "percent": p,
+                "area_km2": area,
+            })
+            # per-isopleth GeoJSON
+            gj = item.get("geometry")
+            if gj:
+                fc = {"type": "FeatureCollection", "features": [{
+                    "type": "Feature",
+                    "properties": {"animal_id": animal, "percent": p, "area_km2": area},
+                    "geometry": gj,
+                }]}
+                fname = f"dbbmm_{str(animal).replace(' ', '_')}_{p}.geojson"
+                with open(os.path.join(outdir, fname), "w") as f:
+                    json.dump(fc, f)
+    if any_bb:
+        with open(os.path.join(outdir, "dbbmm_index.json"), "w") as f:
+            json.dump(index, f, indent=2)
 
 # --------------------------------------------------------------------------------------
 # Orchestrator (keeps your existing name/signature for compatibility)
