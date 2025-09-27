@@ -30,6 +30,15 @@ def set_cached_headers(headers):
     global cached_headers
     cached_headers = list(headers or [])
 
+_dataset_brief = ""
+
+def set_dataset_brief(text: str):
+    global _dataset_brief
+    _dataset_brief = text or ""
+
+def get_dataset_brief() -> str:
+    return _dataset_brief
+
 # ---- Lifecycle helpers ----
 def clear_all_results():
     """
