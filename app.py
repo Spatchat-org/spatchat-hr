@@ -144,25 +144,28 @@ def handle_upload_initial(file):
             ]
 
         # Looks valid; standardize ID/timestamp too, then render map immediately
+        # Looks valid; standardize ID/timestamp too, then render map immediately
         df0 = get_cached_df().copy()
         df0["longitude"] = df0[lon_col]
         df0["latitude"]  = df0[lat_col]
-        df1, _ = detect_and_standardize(df0)
-        set_cached_df(df1)
 
-        # Optional: store dataset brief for LLM Q&A
-        try:
-            brief = build_dataset_context(df1)
-            set_dataset_brief(brief)
-        except Exception as e:
-            print(f"[dataset_brief] skipped: {e}", file=sys.stderr)
+        # Detect source ID/timestamp column names BEFORE standardizing
+        from schema_detect import detect_id_column, detect_timestamp_column, ID_COL, TS_COL
+        src_id = detect_id_column(df0)            # e.g., "test_1" or None
+        src_ts = detect_timestamp_column(df0)     # e.g., "test_2" or None
+
+        # Standardize to animal_id / timestamp
+        df1, meta_msgs = detect_and_standardize(df0)
+        set_cached_df(df1)
 
         map_html = build_preview_map(df1)
 
         id_found  = (ID_COL in df1.columns)
         ts_found  = (TS_COL in df1.columns)
-        id_note   = f"• **ID column**: `{ID_COL if id_found else 'not detected'}`"
-        ts_note   = f"• **Timestamp column**: `{TS_COL if ts_found else 'not detected'}`"
+        # Prefer showing the *source* column names if found, otherwise "not detected"
+        id_note   = f"• **ID column**: `{src_id}`" if src_id else "• **ID column**: `not detected`"
+        ts_note   = f"• **Timestamp column**: `{src_ts}`" if src_ts else "• **Timestamp column**: `not detected`"
+
         tips = []
         if not id_found:
             tips.append("If your data has one, say: **“ID column is <your_col>”** or **“no id”**.")
@@ -200,36 +203,27 @@ def handle_upload_initial(file):
         ]
 
     # ---------- Branch B: heuristic lat/lon guess ----------
-    df = get_cached_df()
-    x_names = ["x", "easting", "lon", "longitude"]
-    y_names = ["y", "northing", "lat", "latitude"]
-    found_x = next((col for col in df.columns if col.lower() in x_names), df.columns[0])
-    found_y = next((col for col in df.columns if col.lower() in y_names and col != found_x),
-                   df.columns[1] if len(df.columns) > 1 else df.columns[0])
-    if found_x == found_y and len(df.columns) > 1:
-        found_y = df.columns[1 if df.columns[0] == found_x else 0]
-
-    latlon_guess = looks_like_latlon(df, found_x, found_y)
     if latlon_guess:
         df0 = df.copy()
         df0["longitude"] = df0[found_x] if latlon_guess == "lonlat" else df0[found_y]
         df0["latitude"]  = df0[found_y] if latlon_guess == "lonlat" else df0[found_x]
-        df1, _ = detect_and_standardize(df0)
-        set_cached_df(df1)
 
-        # Optional: store dataset brief for LLM Q&A
-        try:
-            brief = build_dataset_context(df1)
-            set_dataset_brief(brief)
-        except Exception as e:
-            print(f"[dataset_brief] skipped: {e}", file=sys.stderr)
+        # Detect source ID/timestamp BEFORE standardizing
+        from schema_detect import detect_id_column, detect_timestamp_column, ID_COL, TS_COL
+        src_id = detect_id_column(df0)
+        src_ts = detect_timestamp_column(df0)
+
+        # Standardize to canonical names
+        df1, meta_msgs = detect_and_standardize(df0)
+        set_cached_df(df1)
 
         map_html = build_preview_map(df1)
 
         id_found = (ID_COL in df1.columns)
         ts_found = (TS_COL in df1.columns)
-        id_note  = f"• **ID column**: `{ID_COL if id_found else 'not detected'}`"
-        ts_note  = f"• **Timestamp column**: `{TS_COL if ts_found else 'not detected'}`"
+        id_note  = f"• **ID column**: `{src_id}`" if src_id else "• **ID column**: `not detected`"
+        ts_note  = f"• **Timestamp column**: `{src_ts}`" if src_ts else "• **Timestamp column**: `not detected`"
+
         tips = []
         if not id_found:
             tips.append("If your data has one, say: **“ID column is <your_col>”** or **“no id”**.")
