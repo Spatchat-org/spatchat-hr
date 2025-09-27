@@ -199,7 +199,7 @@ def make_locoh_layers(locoh_result: dict, animal_ids, color_map, name_prefix: st
                 "geometry": gj_geom,
             }
 
-            layer = folium.FeatureGroup(name=f"{animal} {name_prefix} {iso}%", show=(iso in (50,)))
+            layer = folium.FeatureGroup(name=f"{animal} {name_prefix} {iso}%", show=TRUE)
             folium.GeoJson(
                 data=feature,
                 name=f"{name_prefix} {iso}% — {animal}",
