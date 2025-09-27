@@ -37,6 +37,27 @@ from dataset_context import build_dataset_context
 
 print("Starting SpatChat: Home Range Analysis (app.py)")
 
+import numpy as _np
+import pandas as _pd
+from datetime import datetime as _dt, date as _date
+
+def _json_safe(x):
+    if isinstance(x, (_np.integer,)):
+        return int(x)
+    if isinstance(x, (_np.floating,)):
+        return float(x)
+    if isinstance(x, (_np.bool_,)):
+        return bool(x)
+    if isinstance(x, (_pd.Timestamp, _dt, _date)):
+        return x.isoformat()
+    if isinstance(x, _np.ndarray):
+        return [_json_safe(v) for v in x.tolist()]
+    if isinstance(x, (list, tuple, set)):
+        return [_json_safe(v) for v in x]
+    if isinstance(x, dict):
+        return {k: _json_safe(v) for k, v in x.items()}
+    return x
+
 # Track per-upload “pending questions” we may ask the user (id/timestamp)
 PENDING_QUESTIONS = {
     "need_id": False,
@@ -386,7 +407,9 @@ def handle_chat(chat_history, user_message):
         return chat_history, gr.update(), gr.update(visible=False)
 
     # Normal tool-intent call (with dataset context)
-    tool, llm_output = ask_llm(chat_history, user_message, context=_current_dataset_context())
+    context_raw = _current_dataset_context()
+    context_safe = _json_safe(context_raw)
+    tool, llm_output = ask_llm(chat_history, user_message, context=context_safe)
 
     mcp_list, kde_list = [], []
     if tool and tool.get("tool") == "home_range":
