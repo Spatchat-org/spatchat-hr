@@ -1,4 +1,5 @@
 # map_layers.py
+import os
 import random
 import numpy as np
 import folium
@@ -284,6 +285,81 @@ def make_locoh_facets_layers(locoh_result: dict, animal_ids, color_map, name_pre
         ).add_to(layer)
 
         layers.append(layer)
+
+    return layers
+
+def make_dbbmm_layers(dbbmm_results: dict, animal_ids, color_map, name_prefix="dBBMM"):
+    """
+    Build per-animal raster + isopleth contours from dBBMM results.
+    Expects `dbbmm_results` like {animal: {"geotiff": path, "isopleths": [{percent, area_sq_km, geometry}, ...]}}.
+    """
+    import folium
+    import numpy as np
+    import rasterio
+    from shapely.geometry import MultiPolygon, Polygon
+
+    layers = []
+
+    for animal in animal_ids:
+        data = dbbmm_results.get(str(animal)) or dbbmm_results.get(animal)
+        if not data:
+            continue
+
+        color = color_map[animal]
+
+        # 1) Raster UD layer (shown by default)
+        tif_path = data.get("geotiff")
+        if tif_path and os.path.exists(tif_path):
+            raster_layer = folium.FeatureGroup(name=f"{animal} {name_prefix} Raster", show=True)
+            with rasterio.open(tif_path) as src:
+                arr = src.read(1)
+                if np.all(~np.isfinite(arr)) or np.nanmax(arr) <= 0:
+                    pass
+                else:
+                    arr = np.nan_to_num(arr, nan=0.0)
+                    arr_norm = (arr - arr.min()) / (arr.max() - arr.min() + 1e-12)
+                    import matplotlib.pyplot as plt
+                    cmap = plt.get_cmap("viridis")
+                    rgba = (cmap(arr_norm) * 255).astype(np.uint8)
+                    bounds = src.bounds
+                    img = np.dstack([
+                        rgba[:, :, 0], rgba[:, :, 1], rgba[:, :, 2], (rgba[:, :, 3] * 0.70).astype(np.uint8)
+                    ])
+                    raster_layer.add_child(
+                        folium.raster_layers.ImageOverlay(
+                            image=img,
+                            bounds=[[bounds.bottom, bounds.left], [bounds.top, bounds.right]],
+                            opacity=0.7,
+                            interactive=False
+                        )
+                    )
+            layers.append(raster_layer)
+
+        # 2) Contours (polygons) for each requested percent (shown by default)
+        for item in data.get("isopleths", []):
+            percent = int(item["percent"])
+            geom = item["geometry"]
+            layer = folium.FeatureGroup(name=f"{animal} {name_prefix} {percent}%", show=True)
+            # Could be Polygon or MultiPolygon
+            if geom:
+                folium.GeoJson(
+                    data={
+                        "type": "Feature",
+                        "properties": {"animal_id": str(animal), "percent": percent, "area_km2": round(float(item.get("area_sq_km", 0.0)), 3)},
+                        "geometry": geom,
+                    },
+                    style_function=lambda _feat, color=color: {
+                        "fillOpacity": 0.25,
+                        "weight": 2,
+                        "color": color,
+                    },
+                    tooltip=folium.GeoJsonTooltip(
+                        fields=["animal_id", "percent", "area_km2"],
+                        aliases=["Animal", "Isopleth (%)", "Area (km²)"],
+                        localize=True,
+                    ),
+                ).add_to(layer)
+            layers.append(layer)
 
     return layers
 
