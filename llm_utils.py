@@ -81,10 +81,10 @@ class UnifiedLLM:
                     time.sleep(backoff + random.uniform(0,3)); backoff*=1.8
 
 SYSTEM_PROMPT = """
-You are SpatChat, an expert wildlife home range analysis assistant.
-If the user asks for a home range calculation (MCP, KDE, dBBMM, AKDE, etc.), reply ONLY in JSON using:
-{"tool":"home_range","method":"mcp","levels":[95,50]}
-For other questions, answer concisely in plain text.
+You are SpatChat, a wildlife movement expert. You are given a JSON object called dataset_context that contains facts
+about the currently loaded dataset (columns, counts, ranges, small samples). When the user asks anything about the data,
+answer STRICTLY using dataset_context. If the answer is not present or cannot be derived from dataset_context, say you
+don't know and suggest how the user could compute it (briefly). Do not guess or fabricate numbers. Keep replies concise.
 """.strip()
 
 FALLBACK_PROMPT = """
@@ -93,31 +93,22 @@ You are SpatChat, a wildlife movement expert. If you can't map to a tool, answer
 
 _llm = UnifiedLLM()
 
-def ask_llm(chat_history, user_input, context: str | None = None):
-    # main tool-intent call
+def ask_llm(chat_history, user_input, context=None):
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    if context:
+    if context is not None:
+        # give the model the factual snapshot every turn
         messages.append({
             "role": "system",
-            "content": (
-                "Use the following dataset summary when answering questions about the data. "
-                "If a user asks for counts, ranges, or lists present in this summary, prefer it over assumptions.\n\n"
-                f"{context}"
-            )
+            "content": "dataset_context:\n" + json.dumps(context, ensure_ascii=False)
         })
     for m in chat_history:
         messages.append({"role": m["role"], "content": m["content"]})
     messages.append({"role": "user", "content": user_input})
 
     resp = _llm.chat(messages, temperature=0.0, max_tokens=256, stream=False)
+    # try to parse tool JSON if present; otherwise return text
     try:
         call = json.loads(resp)
         return call, resp
     except Exception:
-        conv = _llm.chat(
-            [{"role": "system", "content": FALLBACK_PROMPT}] + messages,
-            temperature=0.7,
-            max_tokens=256,
-            stream=False
-        )
-        return None, conv
+        return None, resp
