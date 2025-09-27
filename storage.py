@@ -243,21 +243,26 @@ def _write_locoh_assets(rows_accum: list[tuple], outdir: str):
 def _write_dbbmm_assets(rows_accum: list[tuple], outdir: str):
     index = {"animals": {}}
     any_bb = False
+
     for animal, data in dbbmm_results.items():
         any_bb = True
-        index["animals"][animal] = {
-            "geotiff": data.get("geotiff"),
-            "isopleths": [],
-        }
-        for item in data.get("isopleths", []):
+
+        # Accept dict or DBBMMResult dataclass
+        if isinstance(data, dict):
+            geotiff = data.get("geotiff")
+            iso_list = data.get("isopleths", []) or []
+        else:
+            geotiff = getattr(data, "geotiff", None)
+            iso_list = getattr(data, "isopleths", []) or []
+
+        index["animals"][animal] = {"geotiff": geotiff, "isopleths": []}
+
+        for item in iso_list:
             p = int(item.get("percent"))
             area = float(item.get("area_sq_km", 0.0))
             rows_accum.append((animal, f"dBBMM-{p}", area))
-            index["animals"][animal]["isopleths"].append({
-                "percent": p,
-                "area_km2": area,
-            })
-            # per-isopleth GeoJSON
+            index["animals"][animal]["isopleths"].append({"percent": p, "area_km2": area})
+
             gj = item.get("geometry")
             if gj:
                 fc = {"type": "FeatureCollection", "features": [{
@@ -268,6 +273,7 @@ def _write_dbbmm_assets(rows_accum: list[tuple], outdir: str):
                 fname = f"dbbmm_{str(animal).replace(' ', '_')}_{p}.geojson"
                 with open(os.path.join(outdir, fname), "w") as f:
                     json.dump(fc, f)
+
     if any_bb:
         with open(os.path.join(outdir, "dbbmm_index.json"), "w") as f:
             json.dump(index, f, indent=2)
