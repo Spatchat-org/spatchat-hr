@@ -387,13 +387,18 @@ def build_results_map(df, mcp_results, kde_results, requested_percents, requeste
     for layer in make_kde_layers(kde_results or {}, requested_kde_percents or [], animal_ids, color_map):
         layer.add_to(m)
 
-    # LoCoH (optional)
+    # LoCoH
     if locoh_result is not None:
         # Envelopes (50/95 or custom)
         for layer in make_locoh_layers(locoh_result, animal_ids, color_map, name_prefix="LoCoH"):
             layer.add_to(m)
         # Facets (tiny hulls, red→yellow)
         for layer in make_locoh_facets_layers(locoh_result, animal_ids, color_map, name_prefix="LoCoH facets"):
+            layer.add_to(m)
+
+    # dBBMM
+    if dbbmm_result is not None:
+        for layer in make_dbbmm_layers(dbbmm_result, animal_ids, color_map, name_prefix="dBBMM"):
             layer.add_to(m)
     
     folium.LayerControl(collapsed=False).add_to(m)
