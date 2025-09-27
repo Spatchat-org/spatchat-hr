@@ -68,12 +68,17 @@ def _json_safe(x):
     return x
 
 def parse_kv_tokens(text: str) -> dict:
-    """Parse simple 'k=10 a=1500 isopleths=50,95' style tokens from a user message."""
+    """
+    Parse key=value tokens without breaking comma-separated lists.
+    Examples:
+      "locoh k=10 a=1500 isopleths=50,95"
+      "dbbmm 95 le=20 res=75 buf=1500 window=31 margin=11 subs=40"
+    """
     toks = {}
-    for tok in text.replace(",", " ").split():
-        if "=" in tok:
-            k, v = tok.split("=", 1)
-            toks[k.strip().lower()] = v.strip().strip(",")
+    for m in re.finditer(r'([A-Za-z_]+)\s*=\s*([^\s]+)', text):
+        k = m.group(1).lower()
+        v = m.group(2).strip().rstrip(",")
+        toks[k] = v
     return toks
 
 def _summarize_locoh(res: dict, params: LoCoHParams) -> str:
