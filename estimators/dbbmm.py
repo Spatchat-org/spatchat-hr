@@ -3,7 +3,7 @@
 # =============================================
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 import math
@@ -24,17 +24,7 @@ from pyproj import Transformer
 
 @dataclass
 class DBBMMParams:
-    """Parameters for dynamic Brownian Bridge Movement Model (dBBMM).
-
-    This is a pragmatic implementation designed for interactive web use. It
-    approximates the original dBBMM (Kranstauber et al. 2012) by estimating a
-    local Brownian motion variance per segment with a rolling window over
-    velocities, then integrates a Brownian bridge along each segment by placing
-    Gaussian contributions at sub-steps.
-
-    NOTE: Units are meters / seconds for motion, meters for rasters.
-    """
-
+    """Parameters for dynamic Brownian Bridge Movement Model (dBBMM)."""
     # Observation location error (1-sigma, meters)
     location_error_m: float = 30.0
     # Odd-sized window of steps used to estimate local variance of velocity
@@ -56,6 +46,81 @@ class DBBMMResult:
     geotiff: str
     isopleths: List[Dict]
 
+
+# -------------------------------------------------------------
+# Helpers
+# -------------------------------------------------------------
+
+def _cdf_threshold(prob_arr: np.ndarray, target: float) -> float | None:
+    """Return threshold t such that pixels >= t cover `target` fraction of mass."""
+    a = np.asarray(prob_arr, dtype=float)
+    a = a[np.isfinite(a)]
+    a = a[a > 0]
+    if a.size == 0:
+        return None
+    a.sort()          # ascending
+    a = a[::-1]       # descending
+    cdf = np.cumsum(a) / float(a.sum())
+    idx = int(np.searchsorted(cdf, target, side="left"))
+    idx = min(max(idx, 0), a.size - 1)
+    return float(a[idx])
+
+
+def _reproj_geom_to_wgs(geom, src_crs: str | int = "EPSG:6933"):
+    tr = Transformer.from_crs(src_crs, "EPSG:4326", always_xy=True)
+    return shp_transform(lambda x, y, z=None: tr.transform(x, y), geom)
+
+
+def _isopleths_from_ud(
+    prob_arr: np.ndarray,
+    transform,
+    src_crs: str | int,
+    levels: Tuple[int, ...],
+) -> List[Dict]:
+    """
+    From a UD raster (probabilities ~ sum to 1), build isopleth polygons at `levels`.
+    Geometry is returned in WGS84 (GeoJSON), area in km².
+    """
+    if not np.isfinite(prob_arr).any() or float(np.nanmax(prob_arr)) <= 0:
+        return []
+
+    # For constant-resolution rasters, pixel area is constant so we can skip area weighting
+    out: List[Dict] = []
+    src_crs_str = str(src_crs or "EPSG:6933")
+
+    for p in sorted({int(l) for l in levels if 1 <= int(l) <= 100}):
+        thr = _cdf_threshold(prob_arr, p / 100.0)
+        if thr is None:
+            continue
+        # Tiny epsilon to avoid dropping plateaus due to float equality
+        mask = np.nan_to_num(prob_arr, nan=0.0) >= (thr - 1e-12)
+
+        # Vectorize to polygons (in src_crs)
+        polygons: List[Polygon] = []
+        for geom, val in rio_shapes(mask.astype(np.uint8), mask=mask, transform=transform):
+            if val == 1:
+                poly = shp_shape(geom)
+                if not poly.is_empty and poly.area > 0:
+                    polygons.append(poly)
+        if not polygons:
+            continue
+
+        mp = unary_union(polygons)  # src_crs
+        # area in m² -> km² (assumes src_crs meters; our UD is in EPSG:6933)
+        area_km2 = float(mp.area) / 1e6
+        mp_wgs = _reproj_geom_to_wgs(mp, src_crs_str)
+        out.append({
+            "percent": int(p),
+            "area_sq_km": area_km2,
+            "geometry": shp_mapping(mp_wgs),
+        })
+
+    return out
+
+
+# -------------------------------------------------------------
+# Main
+# -------------------------------------------------------------
 
 def compute_dbbmm(
     df: pd.DataFrame,
@@ -83,12 +148,8 @@ def compute_dbbmm(
         params = DBBMMParams()
 
     # Prepare transformers
-    to_eq = Transformer.from_crs(4326, 6933, always_xy=True)  # lon/lat -> meters
-    to_wgs = Transformer.from_crs(6933, 4326, always_xy=True)  # meters -> lon/lat
-
-    # Helper to reproject shapely geometries
-    def reproj_geom(geom):
-        return shp_transform(lambda x, y, z=None: to_wgs.transform(x, y), geom)
+    to_eq = Transformer.from_crs(4326, 6933, always_xy=True)   # lon/lat -> meters
+    # to_wgs used only via helper when reprojecting geometry
 
     # Normalize and sanity check
     df0 = df[[id_col, x_col, y_col, ts_col]].dropna().copy()
@@ -106,12 +167,12 @@ def compute_dbbmm(
 
         # Project to meters for calculations
         xs, ys = to_eq.transform(sub["lon"].values, sub["lat"].values)
-        ts = sub["timestamp"].astype("int64").to_numpy() / 1e9
+        ts = sub["timestamp"].astype("int64").to_numpy() / 1e9  # seconds since epoch
+
         # Guard against duplicated timestamps
         dt = np.diff(ts)
         valid = dt > 0
         if not np.all(valid):
-            # Drop zero/negative intervals by collapsing identical timestamps
             keep_idx = np.insert(valid, 0, True)
             xs, ys, ts = xs[keep_idx], ys[keep_idx], ts[keep_idx]
             if len(xs) < 2:
@@ -128,34 +189,32 @@ def compute_dbbmm(
         m = int(max(1, params.margin))
         pad = w // 2
         v_pad = np.pad(v, (pad, pad), mode="edge")
-        # rolling variance (centered)
         v2 = pd.Series(v_pad).rolling(window=w, center=True, min_periods=max(5, w // 3)).var().to_numpy()[pad:-pad]
-        # Ensure length == len(v)
         if len(v2) != len(v):
             v2 = np.resize(v2, len(v))
-        # Replace NaNs and too-low values with a small baseline derived from resolution
-        baseline_var_v = (params.raster_resolution_m / 5.0) ** 2  # (m/s)^2 rough floor
+        baseline_var_v = (params.raster_resolution_m / 5.0) ** 2  # (m/s)^2 floor
+        v2 = np.where(np.isfinite(v2) and np.all(v2 > 0), v2, baseline_var_v) if np.ndim(v2) else baseline_var_v
+        # handle elementwise:
         v2 = np.where(np.isfinite(v2) & (v2 > 0), v2, baseline_var_v)
 
-        # Total segment time
+        # Segment times
         T = dt  # seconds
         # Brownian motion variance parameter per segment (m^2 / s)
-        sigma2 = v2  # pragmatic proxy; could be replaced by ML estimator
+        sigma2 = v2
 
-        # --- Build raster grid (6933 meters) ---
+        # --- Build raster grid (EPSG:6933 meters) ---
         res = float(params.raster_resolution_m)
         buf = float(params.buffer_m)
         minx, maxx = float(np.min(xs) - buf), float(np.max(xs) + buf)
         miny, maxy = float(np.min(ys) - buf), float(np.max(ys) + buf)
         width = int(max(1, math.ceil((maxx - minx) / res)))
         height = int(max(1, math.ceil((maxy - miny) / res)))
-        # affine transform from pixel to map coords
         transform = Affine.translation(minx, maxy) * Affine.scale(res, -res)
 
         UD = np.zeros((height, width), dtype=np.float64)
         cell_area = res * res  # m^2 per pixel
 
-        # --- Integrate bridges along each segment ---
+        # --- Integrate along each segment ---
         nseg = len(steps)
         n_sub = int(max(5, params.n_substeps))
         loc_err2 = float(params.location_error_m) ** 2
@@ -163,14 +222,12 @@ def compute_dbbmm(
         for i in range(nseg):
             x0, y0 = coords[i]
             x1, y1 = coords[i + 1]
-            Ti = max(T[i], 1e-3)  # seconds, avoid zero
+            Ti = max(T[i], 1e-3)  # seconds
             sig2 = max(sigma2[i], (params.raster_resolution_m / 10.0) ** 2)
 
-            # Axis-aligned bbox expanded by ~3 sigma to limit work
-            # We'll update per sub-step, but precompute a generous window
-            # using the segment length as well
+            # bbox window ~3 sigma + half segment length
             seg_len = max(1.0, np.hypot(x1 - x0, y1 - y0))
-            sigma_max = math.sqrt(loc_err2 + sig2 * (0.25 * Ti))  # s*(1-s) max at 0.5
+            sigma_max = math.sqrt(loc_err2 + sig2 * (0.25 * Ti))
             radius = 3.0 * (sigma_max + 0.5 * seg_len)
             minx_w = min(x0, x1) - radius
             maxx_w = max(x0, x1) + radius
@@ -200,7 +257,6 @@ def compute_dbbmm(
             XX, YY = np.meshgrid(xx, yy)
 
             # Accumulate Gaussian kernels for each sub-step
-            # Brownian bridge variance along the segment: sig2 * s*(1-s)*T + loc_err^2
             for x_s, y_s, s in zip(xs_sub, ys_sub, ss):
                 var_s = loc_err2 + sig2 * (s * (1.0 - s) * Ti)
                 if var_s <= 0:
@@ -216,7 +272,7 @@ def compute_dbbmm(
         if total > 0:
             UD /= total
 
-        # Write GeoTIFF (6933 meters)
+        # Write GeoTIFF (EPSG:6933)
         tif_path = os.path.join(outputs_dir, f"dbbmm_{str(animal).replace(' ', '_')}.tif")
         with rasterio.open(
             tif_path,
@@ -232,45 +288,14 @@ def compute_dbbmm(
         ) as dst:
             dst.write(UD.astype(np.float32), 1)
 
-        # --- Extract isopleth polygons by UD thresholding ---
-        # Compute thresholds so that cumulative probability mass equals each target percent
-        flat = UD.ravel()
-        order = np.argsort(flat)[::-1]
-        flat_sorted = flat[order]
-        mass = np.cumsum(flat_sorted * cell_area)
-        total_mass = mass[-1] if mass.size else 0.0
+        # --- Extract isopleth polygons (50/95 by default) ---
+        iso_list = _isopleths_from_ud(
+            prob_arr=UD,
+            transform=transform,
+            src_crs="EPSG:6933",
+            levels=params.isopleths if params.isopleths else (95,),
+        )
 
-        env_list: List[Dict] = []
-        if total_mass > 0 and len(flat_sorted) > 0:
-            for p in sorted(set(int(x) for x in params.isopleths if 1 <= int(x) <= 100)):
-                target = (p / 100.0) * total_mass
-                idx = int(np.searchsorted(mass, target, side="left"))
-                thr = float(flat_sorted[min(idx, len(flat_sorted) - 1)])
-
-                # Binary mask where UD >= threshold
-                mask = (UD >= thr).astype(np.uint8)
-
-                # Vectorize to polygons in 6933 using rasterio.features.shapes
-                polygons: List[Polygon] = []
-                for geom, val in rio_shapes(mask, mask=mask.astype(bool), transform=transform):
-                    if val == 1:
-                        poly = shp_shape(geom)  # in EPSG:6933 meters
-                        if not poly.is_empty and poly.area > 0:
-                            polygons.append(poly)
-
-                if not polygons:
-                    continue
-
-                mp = unary_union(polygons)
-                if isinstance(mp, (Polygon, MultiPolygon)):
-                    area_sq_km = float(mp.area / 1e6)
-                    mp_wgs = reproj_geom(mp)
-                    env_list.append({
-                        "percent": int(p),
-                        "area_sq_km": area_sq_km,
-                        "geometry": shp_mapping(mp_wgs),
-                    })
-
-        results[str(animal)] = DBBMMResult(geotiff=tif_path, isopleths=env_list)
+        results[str(animal)] = DBBMMResult(geotiff=tif_path, isopleths=iso_list)
 
     return results
