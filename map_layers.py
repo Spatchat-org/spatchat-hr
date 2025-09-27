@@ -291,12 +291,12 @@ def make_locoh_facets_layers(locoh_result: dict, animal_ids, color_map, name_pre
 def make_dbbmm_layers(dbbmm_results: dict, animal_ids, color_map, name_prefix="dBBMM"):
     """
     Build per-animal raster + isopleth contours from dBBMM results.
-    Expects `dbbmm_results` like {animal: {"geotiff": path, "isopleths": [{percent, area_sq_km, geometry}, ...]}}.
+    Accepts per-animal entries as either dicts or DBBMMResult dataclasses.
     """
+    import os
     import folium
     import numpy as np
     import rasterio
-    from shapely.geometry import MultiPolygon, Polygon
 
     layers = []
 
@@ -305,17 +305,22 @@ def make_dbbmm_layers(dbbmm_results: dict, animal_ids, color_map, name_prefix="d
         if not data:
             continue
 
+        # Support both dict and dataclass
+        if isinstance(data, dict):
+            tif_path = data.get("geotiff")
+            iso_list = data.get("isopleths", []) or []
+        else:
+            tif_path = getattr(data, "geotiff", None)
+            iso_list = getattr(data, "isopleths", []) or []
+
         color = color_map[animal]
 
         # 1) Raster UD layer (shown by default)
-        tif_path = data.get("geotiff")
         if tif_path and os.path.exists(tif_path):
             raster_layer = folium.FeatureGroup(name=f"{animal} {name_prefix} Raster", show=True)
             with rasterio.open(tif_path) as src:
                 arr = src.read(1)
-                if np.all(~np.isfinite(arr)) or np.nanmax(arr) <= 0:
-                    pass
-                else:
+                if np.isfinite(arr).any() and float(np.nanmax(arr)) > 0:
                     arr = np.nan_to_num(arr, nan=0.0)
                     arr_norm = (arr - arr.min()) / (arr.max() - arr.min() + 1e-12)
                     import matplotlib.pyplot as plt
@@ -335,17 +340,17 @@ def make_dbbmm_layers(dbbmm_results: dict, animal_ids, color_map, name_prefix="d
                     )
             layers.append(raster_layer)
 
-        # 2) Contours (polygons) for each requested percent (shown by default)
-        for item in data.get("isopleths", []):
-            percent = int(item["percent"])
-            geom = item["geometry"]
+        # 2) Isopleth polygons (shown by default)
+        for item in iso_list:
+            percent = int(item.get("percent"))
+            geom = item.get("geometry")
+            area_km2 = float(item.get("area_sq_km", 0.0))
             layer = folium.FeatureGroup(name=f"{animal} {name_prefix} {percent}%", show=True)
-            # Could be Polygon or MultiPolygon
             if geom:
                 folium.GeoJson(
                     data={
                         "type": "Feature",
-                        "properties": {"animal_id": str(animal), "percent": percent, "area_km2": round(float(item.get("area_sq_km", 0.0)), 3)},
+                        "properties": {"animal_id": str(animal), "percent": percent, "area_km2": round(area_km2, 3)},
                         "geometry": geom,
                     },
                     style_function=lambda _feat, color=color: {
