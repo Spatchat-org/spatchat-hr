@@ -63,23 +63,77 @@ def detect_id_column(df: pd.DataFrame) -> Optional[str]:
     return None
 
 def detect_timestamp_column(df: pd.DataFrame) -> Optional[str]:
+    """
+    Detect a timestamp-like column by (1) name and (2) value profile.
+    Rules:
+      - Never pick latitude/longitude columns.
+      - For numeric columns, only accept if they look like real timestamps:
+          * Unix seconds (>=1e8),
+          * Unix milliseconds (>=1e11),
+          * Excel serial day numbers (~ [20000, 60000]) -> years ~1954–2064.
+      - For strings, require that >=80% rows parse to datetime.
+    """
     cols = list(df.columns)
-    # 1) by name
+    low = [c.lower().strip() for c in cols]
+
+    # 0) Known columns to ignore for timestamp detection
+    COORD_LIKE = {"lat", "latitude", "lon", "longitude", "x", "y", "easting", "northing"}
+
+    # 1) By name (exact or substring), but never pick coord-like names
     name = _best_match_by_name(cols, TS_CANDIDATES)
-    if name and _is_timestamp_series(df[name]):
-        return name
-    # 2) scan for parseable datetime columns
+    if name and name.lower().strip() not in COORD_LIKE:
+        # sanity check: must parse for at least 50% rows
+        try:
+            parsed = pd.to_datetime(df[name], errors="coerce", utc=True)
+            if parsed.notna().mean() >= 0.5:
+                return name
+        except Exception:
+            pass  # fall through to scanning
+
+    # 2) Scan columns by value profile with guards
     best = None
     best_score = 0.0
+
     for c in cols:
+        lc = c.lower().strip()
+        if lc in COORD_LIKE:
+            continue
+
+        s = df[c]
+
+        # Reject obvious non-candidates
+        if s.dtype.kind in ("b",):  # booleans
+            continue
+
+        is_numeric = pd.api.types.is_numeric_dtype(s)
+        name_looks_timey = any(tok in lc for tok in ["time", "date", "stamp", "datetime"])
+
+        if is_numeric:
+            # Only consider numeric if name suggests time OR values look like real timestamps
+            sn = pd.to_numeric(s, errors="coerce")
+            if sn.notna().mean() < 0.8:
+                continue
+
+            median_abs = float(sn.abs().median())
+
+            looks_unix_seconds = median_abs >= 1e8           # ~1973+
+            looks_unix_millis  = median_abs >= 1e11          # ms since epoch
+            looks_excel_days   = 20000 <= median_abs <= 60000 # ~1954–2064
+
+            if not (name_looks_timey or looks_unix_seconds or looks_unix_millis or looks_excel_days):
+                # e.g., latitude ~ 40, altitude ~ 1700, etc. -> reject
+                continue
+
+        # Finally, require that parsing succeeds for >=80% rows
         try:
-            parsed = pd.to_datetime(df[c], errors="coerce", utc=True)
+            parsed = pd.to_datetime(s, errors="coerce", utc=True)
             score = parsed.notna().mean()
             if score > best_score and score >= 0.8:
                 best = c
                 best_score = score
         except Exception:
             continue
+
     return best
 
 def detect_and_standardize(df: pd.DataFrame):
