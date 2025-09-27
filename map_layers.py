@@ -6,8 +6,9 @@ import folium
 import rasterio
 import matplotlib.pyplot as plt
 from shapely.geometry import Polygon, MultiPolygon
-
 from map_utils import fit_map_to_bounds
+from pyproj import Transformer
+
 
 def _base_map(center_lat, center_lon, control_scale=True, zoom=9):
     m = folium.Map(location=[center_lat, center_lon], zoom_start=zoom, control_scale=control_scale)
@@ -326,16 +327,26 @@ def make_dbbmm_layers(dbbmm_results: dict, animal_ids, color_map, name_prefix="d
                     import matplotlib.pyplot as plt
                     cmap = plt.get_cmap("viridis")
                     rgba = (cmap(arr_norm) * 255).astype(np.uint8)
-                    bounds = src.bounds
+        
+                    # --- transform bounds from raster CRS -> WGS84 ---
+                    b = src.bounds
+                    src_crs = src.crs.to_string() if src.crs else "EPSG:6933"
+                    to_wgs = Transformer.from_crs(src_crs, "EPSG:4326", always_xy=True)
+                    sw_lon, sw_lat = to_wgs.transform(b.left,  b.bottom)
+                    ne_lon, ne_lat = to_wgs.transform(b.right, b.top)
+                    bounds_ll = [[sw_lat, sw_lon], [ne_lat, ne_lon]]  # [[south, west], [north, east]]
+        
                     img = np.dstack([
-                        rgba[:, :, 0], rgba[:, :, 1], rgba[:, :, 2], (rgba[:, :, 3] * 0.70).astype(np.uint8)
+                        rgba[:, :, 0], rgba[:, :, 1], rgba[:, :, 2],
+                        (rgba[:, :, 3] * 0.70).astype(np.uint8)
                     ])
+        
                     raster_layer.add_child(
                         folium.raster_layers.ImageOverlay(
                             image=img,
-                            bounds=[[bounds.bottom, bounds.left], [bounds.top, bounds.right]],
+                            bounds=bounds_ll,
                             opacity=0.7,
-                            interactive=False
+                            interactive=False,
                         )
                     )
             layers.append(raster_layer)
