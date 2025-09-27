@@ -20,8 +20,10 @@ from storage import (
     clear_all_results,
     mcp_results, kde_results,
     requested_percents, requested_kde_percents,
-    save_all_mcps_zip
+    save_all_mcps_zip,
+    set_locoh_results,
 )
+
 from llm_utils import ask_llm
 from crs_utils import parse_crs_input
 from map_utils import render_empty_map
@@ -571,6 +573,7 @@ def handle_chat(chat_history, user_message):
                 y_col="lat",
                 params=locoh_params or LoCoHParams()
             )
+            set_locoh_results(locoh_result)
             results_exist = True
         except Exception as e:
             locoh_error = str(e)
