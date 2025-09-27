@@ -138,19 +138,21 @@ def compute_locoh(
         if targets[-1] not in polys_by_iso:
             polys_by_iso[targets[-1]] = cum_union if cum_union is not None else unary_union(hulls_m)
 
-        # Reproject to WGS84 and compute areas (sq km)
-        def reproj(poly: Polygon) -> Polygon:
-            lon, lat = to_wgs.transform(*poly.exterior.coords.xy)
-            return Polygon(zip(lon, lat))
-
+        # Reproject to WGS84 and compute areas (sq km), preserving MultiPolygons & holes
+        from shapely.ops import transform as shp_transform
+        
+        def reproj_geom(geom):
+            # transform expects a function (x, y) -> (x', y')
+            return shp_transform(lambda x, y, z=None: to_wgs.transform(x, y), geom)
+        
         results = []
-        for iso, poly_m in polys_by_iso.items():
-            area_sqkm = poly_m.area / 1e6  # m^2 -> km^2 (since EPSG:6933 meters)
-            poly_wgs = reproj(poly_m)
+        for iso, geom_m in polys_by_iso.items():
+            area_sqkm = geom_m.area / 1e6  # m^2 -> km^2
+            geom_wgs = reproj_geom(geom_m)  # preserves MultiPolygon + interiors
             results.append({
                 "isopleth": int(iso),
                 "area_sq_km": float(area_sqkm),
-                "geometry": mapping(poly_wgs),
+                "geometry": mapping(geom_wgs),
             })
 
         out["animals"][str(animal)] = {
