@@ -20,26 +20,24 @@ from shapely.geometry import Polygon, MultiPolygon, mapping
 from storage import (
     get_cached_df, set_cached_df,
     get_cached_headers, set_cached_headers,
+    get_dataset_brief, set_dataset_brief,
     clear_all_results,
     mcp_results, kde_results,
     requested_percents, requested_kde_percents,
-    save_all_mcps_zip,
+    save_all_mcps_zip
 )
 from llm_utils import ask_llm
 from crs_utils import parse_crs_input
 from map_utils import render_empty_map, fit_map_to_bounds
-
-# NEW: small helpers extracted
 from coords_utils import looks_like_latlon, looks_invalid_latlon, parse_levels_from_text
 from map_layers import build_preview_map, build_results_map
-
-# Auto-detection for ID / timestamp
 from schema_detect import (
     detect_and_standardize,
     parse_metadata_command,
     try_apply_user_mapping,
     ID_COL, TS_COL
 )
+from data_brief import build_dataset_brief
 
 print("Starting SpatChat: Home Range Analysis (app.py)")
 
@@ -295,12 +293,11 @@ def handle_upload_confirm(x_col, y_col, crs_text):
     # Detect & standardize metadata columns (animal_id/timestamp)
     df, _ = detect_and_standardize(df)
 
-    # Persist
     set_cached_df(df)
+    brief = build_dataset_brief(df)
+    set_dataset_brief(brief)
 
-    # Build preview map
     return build_preview_map(df)
-
 
 def confirm_and_hint(x_col, y_col, crs_text, chat_history):
     """
@@ -364,7 +361,7 @@ def handle_chat(chat_history, user_message):
         return chat_history, gr.update(), gr.update(visible=False)
 
     # Normal tool-intent call
-    tool, llm_output = ask_llm(chat_history, user_message)
+    tool, llm_output = ask_llm(chat_history, user_message, context=get_dataset_brief())
 
     mcp_list, kde_list = [], []
     if tool and tool.get("tool") == "home_range":
