@@ -22,6 +22,7 @@ from storage import (
     requested_percents, requested_kde_percents,
     save_all_mcps_zip,
     set_locoh_results,
+    set_dbbmm_results, requested_dbbmm_percents
 )
 
 from llm_utils import ask_llm
@@ -37,8 +38,8 @@ from schema_detect import (
 )
 from dataset_context import build_dataset_context
 
-# NEW: LoCoH estimator
 from estimators.locoh import compute_locoh, LoCoHParams
+from estimators.dbbmm import compute_dbbmm, DBBMMParams
 
 print("Starting SpatChat: Home Range Analysis (app.py) — handlers only")
 
@@ -400,12 +401,12 @@ def confirm_and_hint(x_col, y_col, crs_text, chat_history):
     return map_html, chat
 
 # --------------------------------------------------------------------------------------
-# Analysis + chat handler (MCP / KDE / LoCoH)
+# Analysis + chat handler
 # --------------------------------------------------------------------------------------
 def handle_chat(chat_history, user_message):
     """
     Handles user chat. If a home range request is detected (via LLM tool or keywords),
-    run MCP/KDE/LoCoH and refresh the map. Otherwise answer briefly (via llm_utils.ask_llm).
+    run MCP/KDE/LoCoH/dBBMM and refresh the map. Otherwise answer briefly (via llm_utils.ask_llm).
     Also processes user commands like:
       - "timestamp column is <name>"
       - "id column is <name>"
@@ -447,11 +448,16 @@ def handle_chat(chat_history, user_message):
     context_safe = _json_safe(context_raw)
     tool, llm_output = ask_llm(chat_history, user_message, context=context_safe)
 
+    # -------------------------
+    # Parse intents/keywords
+    # -------------------------
     mcp_list, kde_list = [], []
     locoh_requested = False
     locoh_params = None
+    dbbmm_list = []
+    dbbmm_params = None
 
-    # Tool intent → fill lists (extensible to LoCoH if your tool emits it)
+    # Tool intent → fill lists (extensible)
     if tool and tool.get("tool") == "home_range":
         method = tool.get("method")
         levels = tool.get("levels", [95])
@@ -461,22 +467,25 @@ def handle_chat(chat_history, user_message):
         elif method == "kde":
             kde_list = levels
         elif method == "locoh":
-            # If your LLM tool can emit LoCoH, map here; otherwise the keyword branch below catches it.
             locoh_requested = True
             locoh_params = LoCoHParams(method=tool.get("locoh_method", "k"),
                                        k=int(tool.get("k", 10)),
                                        a=tool.get("a"),
                                        r=tool.get("r"),
                                        isopleths=tuple(levels or (50, 95)))
+        elif method == "dbbmm":
+            dbbmm_list = levels or [95]
+            # fall back to default params; keyword parse below can override
+            dbbmm_params = DBBMMParams(isopleths=tuple(dbbmm_list))
 
-    # Fallback: keyword parse (MCP/KDE existing)
+    # Fallback: keyword parse
     msg_lower = user_message.lower()
     if "mcp" in msg_lower:
         mcp_list = parse_levels_from_text(user_message)
     if "kde" in msg_lower:
         kde_list = parse_levels_from_text(user_message)
 
-    # NEW: keyword parse for LoCoH (supports 'k', 'a', 'r' + isopleths)
+    # LoCoH keywords (supports k/a/r + isopleths)
     if "locoh" in msg_lower:
         locoh_requested = True
         toks = parse_kv_tokens(user_message)
@@ -496,20 +505,49 @@ def handle_chat(chat_history, user_message):
                 r = float(r)
             except Exception:
                 r = None
-        # Isopleths: either explicit via token or parsed like "50 95"
         iso_str = toks.get("isopleths")
         if iso_str:
             iso = tuple(int(s) for s in re.split(r"[,\s]+", iso_str) if s)
         else:
-            # reuse existing parse_levels; clamp to 1..99 (LoCoH 100% is allowed in principle,
-            # but visually it often overlaps fully; we keep 50/95 as sensible defaults)
             parsed = parse_levels_from_text(user_message)
             iso = tuple(parsed) if parsed else (50, 95)
         locoh_params = LoCoHParams(method=method, k=k, a=a, r=r, isopleths=iso)
 
+    # dBBMM keywords
+    if "dbbmm" in msg_lower:
+        dbbmm_list = parse_levels_from_text(user_message) or [95]
+        toks = parse_kv_tokens(user_message)
+
+        def _get_float(keys, default):
+            for k in keys:
+                if k in toks:
+                    try:
+                        return float(toks[k])
+                    except Exception:
+                        pass
+            return float(default)
+
+        def _get_int(keys, default):
+            for k in keys:
+                if k in toks:
+                    try:
+                        return int(toks[k])
+                    except Exception:
+                        pass
+            return int(default)
+
+        dbbmm_params = DBBMMParams(
+            location_error_m=_get_float(["le", "locerr", "sigma"], 30.0),
+            window_size=_get_int(["window", "w"], 31),
+            margin=_get_int(["margin", "m"], 11),
+            raster_resolution_m=_get_float(["res", "resolution"], 50.0),
+            buffer_m=_get_float(["buf", "buffer"], 1000.0),
+            n_substeps=_get_int(["subs", "substeps"], 40),
+            isopleths=tuple(dbbmm_list),
+        )
+
     # If not an analysis request, reply naturally (short)
-    if not mcp_list and not kde_list and not locoh_requested:
-        # If we still owe clarifications about missing columns, prompt once
+    if not mcp_list and not kde_list and not locoh_requested and not dbbmm_list:
         if PENDING_QUESTIONS["need_id"] and not PENDING_QUESTIONS["id_prompted"]:
             chat_history.append({"role": "assistant", "content":
                                  "I couldn’t detect an individual ID column. If your data has one, say: “ID column is tag_id”. "
@@ -524,11 +562,11 @@ def handle_chat(chat_history, user_message):
             PENDING_QUESTIONS["ts_prompted"] = True
             return chat_history, gr.update(), gr.update(visible=False)
 
-        # Otherwise short LLM response
         if llm_output:
             chat_history.append({"role": "user", "content": user_message})
             chat_history.append({"role": "assistant", "content": llm_output})
             return chat_history, gr.update(), gr.update(visible=False)
+
         chat_history.append({"role": "assistant", "content": "How can I help you? Please upload a CSV for analysis or ask a question."})
         return chat_history, gr.update(), gr.update(visible=False)
 
@@ -542,6 +580,7 @@ def handle_chat(chat_history, user_message):
     warned_about_kde_100 = False
     locoh_result = None
     locoh_error = None
+    dbbmm_result = None
 
     # KDE 100% → clamp to 99% and warn
     if kde_list:
@@ -549,22 +588,23 @@ def handle_chat(chat_history, user_message):
             warned_about_kde_100 = True
         kde_list = [min(k, 99) for k in kde_list]
 
-    # Run analyses (delegated to estimators/*)
+    # -------------------------
+    # Run analyses
+    # -------------------------
     if mcp_list:
         from estimators.mcp import add_mcps
         add_mcps(df, mcp_list)
         requested_percents.update(mcp_list)
         results_exist = True
+
     if kde_list:
         from estimators.kde import add_kdes
         add_kdes(df, kde_list)
         requested_kde_percents.update(kde_list)
         results_exist = True
 
-    # LoCoH
     if locoh_requested:
         try:
-            # estimator expects lon/lat column names (x_col/y_col) passed explicitly
             df_locoh = df.rename(columns={"longitude": "lon", "latitude": "lat"})
             locoh_result = compute_locoh(
                 df=df_locoh,
@@ -578,14 +618,34 @@ def handle_chat(chat_history, user_message):
         except Exception as e:
             locoh_error = str(e)
 
-    # Build map (points/tracks + MCP/KDE + LoCoH if present)
+    if dbbmm_list:
+        try:
+            if "timestamp" not in df.columns:
+                raise ValueError("dBBMM requires a timestamp column to model movement between fixes.")
+            dbbmm_result = compute_dbbmm(
+                df=df,                      # df already standardized
+                id_col="animal_id",
+                x_col="longitude",
+                y_col="latitude",
+                ts_col="timestamp",
+                params=dbbmm_params,
+                outputs_dir="outputs",
+            )
+            set_dbbmm_results(dbbmm_result)
+            requested_dbbmm_percents.update(dbbmm_list)
+            results_exist = True
+        except Exception as e:
+            chat_history.append({"role": "assistant", "content": f"dBBMM error: {e}"})
+
+    # Build map (points/tracks + estimators)
     map_html = build_results_map(
         df,
         mcp_results=mcp_results,
         kde_results=kde_results,
         requested_percents=requested_percents,
         requested_kde_percents=requested_kde_percents,
-        locoh_result=locoh_result
+        locoh_result=locoh_result,
+        dbbmm_result=dbbmm_result,
     )
 
     # Compose assistant message & ZIP
@@ -600,16 +660,15 @@ def handle_chat(chat_history, user_message):
         msgs.append(_summarize_locoh(locoh_result, locoh_params or LoCoHParams()))
     if locoh_error:
         msgs.append(f"LoCoH error: {locoh_error}")
+    if dbbmm_list:
+        msgs.append(f"dBBMM UDs computed ({', '.join(str(p) for p in sorted(set(dbbmm_list))) }% isopleths). Raster + contours added.")
 
-    # Only mention the download button if we actually produced results
     if results_exist:
         msgs.append("_The download button is below the preview map._")
 
     chat_history.append({"role": "user", "content": user_message})
     chat_history.append({"role": "assistant", "content": " ".join(msgs) if msgs else "Done."})
 
-    # NOTE: current bundler exports MCP assets. To include LoCoH in the zip, add the
-    # suggested snippet to storage.zip builder (see earlier guidance).
     archive_path = save_all_mcps_zip()
     return chat_history, gr.update(value=map_html), gr.update(value=archive_path, visible=results_exist)
 
