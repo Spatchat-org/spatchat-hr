@@ -153,34 +153,80 @@ def _write_kde_assets(rows_accum: list[tuple], outdir: str):
 def _write_locoh_assets(rows_accum: list[tuple], outdir: str):
     """
     rows_accum += (animal_id, 'LoCoH-<isopleth>', area_km2)
-    Writes locoh_results.json, plus optional per-animal/isopleth FeatureCollections.
+    Writes:
+      - locoh_results.json               (full object: envelopes + facets)
+      - locoh_<animal>_<iso>.geojson     (per-animal, per-isopleth ENVELOPE)
+      - locoh_facets_<animal>.geojson    (per-animal FACETS: tiny local hulls)
+      - locoh_envelopes.geojson          (ALL animals×isopleth envelopes in one file)
+      - locoh_facets.geojson             (ALL facets in one file)
     """
     if not locoh_results or not isinstance(locoh_results, dict):
         return
 
-    # Write the full LoCoH result for reproducibility
+    # Full results (for reproducibility/programmatic use)
     with open(os.path.join(outdir, "locoh_results.json"), "w") as f:
         json.dump(locoh_results, f)
 
     animals = (locoh_results.get("animals") or {})
+
+    # Accumulators for consolidated files
+    envelope_features = []   # all animals×isopleths
+    facets_features = []     # all animals facets
+
     for animal_id, data in animals.items():
+        # ----- Envelopes (single-piece per isopleth) -----
         for item in data.get("isopleths", []):
             iso = int(item.get("isopleth"))
             area = float(item.get("area_sq_km", 0.0))
             rows_accum.append((animal_id, f"LoCoH-{iso}", area))
 
-            # Optional: write one small GeoJSON per isopleth for GIS users
             gj = item.get("geometry")
             if gj:
-                feat = {
+                feat_env = {
                     "type": "Feature",
                     "properties": {"animal_id": animal_id, "isopleth": iso, "area_km2": area},
                     "geometry": gj,
                 }
-                fc = {"type": "FeatureCollection", "features": [feat]}
-                fname = f"locoh_{str(animal_id).replace(' ', '_')}_{iso}.geojson"
-                with open(os.path.join(outdir, fname), "w") as f:
-                    json.dump(fc, f)
+                envelope_features.append(feat_env)
+
+                # Per-animal, per-isopleth file (kept for convenience)
+                fc_env_one = {"type": "FeatureCollection", "features": [feat_env]}
+                fname_env_one = f"locoh_{str(animal_id).replace(' ', '_')}_{iso}.geojson"
+                with open(os.path.join(outdir, fname_env_one), "w") as f:
+                    json.dump(fc_env_one, f)
+
+        # ----- Facets (tiny hulls; many features) -----
+        animal_facets = []
+        for fct in (data.get("facets") or []):
+            feat_facet = {
+                "type": "Feature",
+                "properties": {
+                    "animal_id": animal_id,
+                    "cum_percent": int(fct.get("cum_percent", 0)),
+                    "area_km2": float(fct.get("area_sq_km", 0.0)),
+                },
+                "geometry": fct.get("geometry"),
+            }
+            animal_facets.append(feat_facet)
+            facets_features.append(feat_facet)
+
+        # Per-animal facets file (only if present)
+        if animal_facets:
+            fc_facets_one = {"type": "FeatureCollection", "features": animal_facets}
+            fname_facets_one = f"locoh_facets_{str(animal_id).replace(' ', '_')}.geojson"
+            with open(os.path.join(outdir, fname_facets_one), "w") as f:
+                json.dump(fc_facets_one, f)
+
+    # ----- Consolidated files -----
+    if envelope_features:
+        fc_env_all = {"type": "FeatureCollection", "features": envelope_features}
+        with open(os.path.join(outdir, "locoh_envelopes.geojson"), "w") as f:
+            json.dump(fc_env_all, f)
+
+    if facets_features:
+        fc_fac_all = {"type": "FeatureCollection", "features": facets_features}
+        with open(os.path.join(outdir, "locoh_facets.geojson"), "w") as f:
+            json.dump(fc_fac_all, f)
 
 # --------------------------------------------------------------------------------------
 # Orchestrator (keeps your existing name/signature for compatibility)
