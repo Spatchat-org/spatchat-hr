@@ -1,6 +1,3 @@
-# ================================
-# app.py (core, without UI)
-# ================================
 import os
 import json
 import re
