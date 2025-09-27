@@ -109,12 +109,12 @@ def ask_llm(chat_history, user_input, context: str | None = None):
         messages.append({"role": m["role"], "content": m["content"]})
     messages.append({"role": "user", "content": user_input})
 
-    resp = llm.chat(messages, temperature=0.0, max_tokens=256, stream=False)
+    resp = _llm.chat(messages, temperature=0.0, max_tokens=256, stream=False)
     try:
         call = json.loads(resp)
         return call, resp
     except Exception:
-        conv = llm.chat(
+        conv = _llm.chat(
             [{"role": "system", "content": FALLBACK_PROMPT}] + messages,
             temperature=0.7,
             max_tokens=256,
