@@ -37,7 +37,6 @@ from schema_detect import (
     try_apply_user_mapping,
     ID_COL, TS_COL
 )
-from data_brief import build_dataset_brief
 
 print("Starting SpatChat: Home Range Analysis (app.py)")
 
