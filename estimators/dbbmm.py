@@ -193,8 +193,6 @@ def compute_dbbmm(
         if len(v2) != len(v):
             v2 = np.resize(v2, len(v))
         baseline_var_v = (params.raster_resolution_m / 5.0) ** 2  # (m/s)^2 floor
-        v2 = np.where(np.isfinite(v2) and np.all(v2 > 0), v2, baseline_var_v) if np.ndim(v2) else baseline_var_v
-        # handle elementwise:
         v2 = np.where(np.isfinite(v2) & (v2 > 0), v2, baseline_var_v)
 
         # Segment times
