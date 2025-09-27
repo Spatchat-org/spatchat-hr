@@ -93,12 +93,31 @@ You are SpatChat, a wildlife movement expert. If you can't map to a tool, answer
 
 _llm = UnifiedLLM()
 
-def ask_llm(chat_history, user_input):
-    msgs = [{"role":"system","content":SYSTEM_PROMPT}] + chat_history + [{"role":"user","content":user_input}]
-    resp = _llm.chat(msgs, temperature=0.0, max_tokens=256, stream=False)
+def ask_llm(chat_history, user_input, context: str | None = None):
+    # main tool-intent call
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    if context:
+        messages.append({
+            "role": "system",
+            "content": (
+                "Use the following dataset summary when answering questions about the data. "
+                "If a user asks for counts, ranges, or lists present in this summary, prefer it over assumptions.\n\n"
+                f"{context}"
+            )
+        })
+    for m in chat_history:
+        messages.append({"role": m["role"], "content": m["content"]})
+    messages.append({"role": "user", "content": user_input})
+
+    resp = llm.chat(messages, temperature=0.0, max_tokens=256, stream=False)
     try:
         call = json.loads(resp)
         return call, resp
     except Exception:
-        conv = _llm.chat([{"role":"system","content":FALLBACK_PROMPT}] + msgs, temperature=0.7, max_tokens=256, stream=False)
+        conv = llm.chat(
+            [{"role": "system", "content": FALLBACK_PROMPT}] + messages,
+            temperature=0.7,
+            max_tokens=256,
+            stream=False
+        )
         return None, conv
