@@ -322,7 +322,6 @@ def make_dbbmm_layers(dbbmm_results: dict, animal_ids, color_map, name_prefix="d
             with rasterio.open(tif_path) as src:
                 arr = src.read(1)
         
-                # Debug: see if the UD has signal
                 print(f"[dBBMM] {animal}: raster shape={arr.shape}, max={np.nanmax(arr) if np.isfinite(arr).any() else 'nan'}")
         
                 if np.isfinite(arr).any() and float(np.nanmax(arr)) > 0:
@@ -330,35 +329,51 @@ def make_dbbmm_layers(dbbmm_results: dict, animal_ids, color_map, name_prefix="d
                     arr_norm = (arr - arr.min()) / (arr.max() - arr.min() + 1e-12)
         
                     import matplotlib.pyplot as plt
-                    cmap = plt.get_cmap("plasma")  # good contrast on satellite
+                    cmap = plt.get_cmap("plasma")
                     rgba = (cmap(arr_norm) * 255).astype(np.uint8)
         
                     # --- transform ALL 4 corners from raster CRS -> WGS84 (EPSG:4326) ---
                     b = src.bounds
                     src_crs = src.crs.to_string() if src.crs else "EPSG:6933"
                     to_wgs = Transformer.from_crs(src_crs, "EPSG:4326", always_xy=True)
-                    # four corners: (left,bottom), (left,top), (right,bottom), (right,top)
                     pts_m = [(b.left, b.bottom), (b.left, b.top), (b.right, b.bottom), (b.right, b.top)]
-                    pts_ll = [to_wgs.transform(x, y) for x, y in pts_m]  # -> (lon, lat)
+                    pts_ll = [to_wgs.transform(x, y) for x, y in pts_m]  # (lon, lat)
                     lons = [p[0] for p in pts_ll]
                     lats = [p[1] for p in pts_ll]
-                    bounds_ll = [[min(lats), min(lons)], [max(lats), max(lons)]]  # [[south, west], [north, east]]
+                    south, west, north, east = min(lats), min(lons), max(lats), max(lons)
+                    bounds_ll = [[south, west], [north, east]]
+        
+                    print(f"[dBBMM] {animal}: bounds_ll SW=({south:.6f},{west:.6f}) NE=({north:.6f},{east:.6f})")
+        
+                    # Debug rectangle around the overlay bounds so we can see location even if image is invisible
+                    debug_rect = folium.FeatureGroup(name=f"{animal} dBBMM Bounds (debug)", show=False)
+                    folium.Polygon(
+                        locations=[
+                            (south, west), (south, east), (north, east), (north, west), (south, west)
+                        ],
+                        color="#8844ff", weight=2, fill=False, opacity=0.9
+                    ).add_to(debug_rect)
+                    layers.append(debug_rect)
         
                     img = np.dstack([
                         rgba[:, :, 0], rgba[:, :, 1], rgba[:, :, 2],
-                        (rgba[:, :, 3]).astype(np.uint8)  # keep alpha from cmap
+                        (rgba[:, :, 3]).astype(np.uint8)
                     ])
+        
+                    # If image still doesn't show, try uncommenting the next line to flip vertically:
+                    # img = np.flipud(img)
         
                     raster_layer.add_child(
                         folium.raster_layers.ImageOverlay(
                             image=img,
                             bounds=bounds_ll,
-                            opacity=0.85,            # extra punch
+                            opacity=0.88,
                             interactive=False,
+                            zindex=1000,  # keep it above other overlays
                         )
                     )
             layers.append(raster_layer)
-            
+                    
         print(f"[dBBMM] {animal}: n_isopleth_features={len(iso_list)}")
 
         # 2) Isopleth polygons (shown by default)
