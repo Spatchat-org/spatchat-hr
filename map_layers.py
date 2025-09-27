@@ -174,28 +174,50 @@ def make_locoh_layers(locoh_result: dict, animal_ids, color_map, name_prefix: st
     Return a list of FeatureGroups for LoCoH isopleths per animal.
     Expects GeoJSON-like geometries in WGS84 (lon/lat).
     """
+    import folium
+
     layers = []
     animals_dict = locoh_result.get("animals", {}) if locoh_result else {}
     for animal in animal_ids:
         data = animals_dict.get(str(animal)) or animals_dict.get(animal)
         if not data:
             continue
+
         for item in data.get("isopleths", []):
-            iso = item["isopleth"]
-            gj = item["geometry"]  # GeoJSON mapping
+            iso = int(item["isopleth"])
+            gj_geom = item["geometry"]  # geometry dict
+            area_km2 = float(item.get("area_sq_km", 0.0))
+
+            # Wrap geometry into a Feature with properties for the tooltip
+            feature = {
+                "type": "Feature",
+                "properties": {
+                    "animal_id": str(animal),
+                    "isopleth": iso,
+                    "area_km2": round(area_km2, 3),
+                },
+                "geometry": gj_geom,
+            }
+
             layer = folium.FeatureGroup(name=f"{animal} {name_prefix} {iso}%", show=(iso in (50,)))
             folium.GeoJson(
-                gj,
+                data=feature,
                 name=f"{name_prefix} {iso}% — {animal}",
                 style_function=lambda _feat, iso=iso, animal=animal: {
                     "fillOpacity": 0.45 if iso != 95 else 0.25,
                     "weight": 2,
                     "color": color_map[animal],
                 },
-                tooltip=folium.GeoJsonTooltip(fields=[], aliases=[], labels=False),
+                tooltip=folium.GeoJsonTooltip(
+                    fields=["animal_id", "isopleth", "area_km2"],
+                    aliases=["Animal", "Isopleth (%)", "Area (km²)"],
+                    localize=True,
+                ),
             ).add_to(layer)
             layers.append(layer)
+
     return layers
+
 
 # ---------- Composition entrypoint ----------
 
