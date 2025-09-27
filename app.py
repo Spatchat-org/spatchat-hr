@@ -171,7 +171,6 @@ def handle_upload_initial(file):
             "• “I want 100% MCP”\n"
             "• “I want 95 KDE”\n"
             "• “MCP 95 50”\n\n"
-            "_(The download button is below the preview map.)_"
         )
 
         return [
@@ -616,15 +615,16 @@ def handle_chat(chat_history, user_message):
 
     # Compose assistant message & ZIP
     msg = []
-    if mcp_list:
-        msg.append(f"MCP home ranges ({', '.join(str(p) for p in mcp_list)}%) calculated.")
-    if kde_list:
-        msg.append(f"KDE home ranges ({', '.join(str(p) for p in kde_list)}%) calculated (raster & contours).")
+    if requested_percents:
+        msg.append(f"MCP home ranges ({', '.join(str(p) for p in sorted(requested_percents))}%) calculated.")
+    if requested_kde_percents:
+        msg.append(f"KDE home ranges ({', '.join(str(p) for p in sorted(requested_kde_percents))}%) calculated (raster & contours).")
     if warned_about_kde_100:
-        msg.append("Note: KDE at 100% is not supported and has been replaced by 99% for compatibility.")
-
-    # NOTE: your Download button is to the right (under the map preview area)
-    msg.append("Download results from the button under the map.")
+        msg.append("Note: KDE at 100% is not supported and has been replaced by 99% for compatibility (as done in scientific software).")
+    
+    # Only mention the download button if we actually produced results
+    if results_exist:
+        msg.append("_The download button is below the preview map._")
 
     chat_history.append({"role": "user", "content": user_message})
     chat_history.append({"role": "assistant", "content": " ".join(msg)})
