@@ -60,6 +60,29 @@ def build_preview_map(df):
     m = fit_map_to_bounds(m, df)
     return m._repr_html_()
 
+def make_locoh_layers(locoh_result: dict, name_prefix: str = "LoCoH"):
+    """Return a list of (layer_name, folium.GeoJson) for 50/95 isopleths per animal."""
+    import folium
+
+    layers = []
+    for animal_id, data in locoh_result.get("animals", {}).items():
+        for item in data.get("isopleths", []):
+            iso = item["isopleth"]
+            gj = item["geometry"]
+            layer_name = f"{name_prefix} {iso}% — {animal_id}"
+            g = folium.GeoJson(
+                gj,
+                name=layer_name,
+                tooltip=folium.GeoJsonTooltip(fields=[], aliases=[], labels=False),
+                style_function=lambda _feat, iso=iso: {
+                    "fillOpacity": 0.25 if iso == 95 else 0.45,
+                    "weight": 2,
+                },
+                show=(iso in (50,)),
+            )
+            layers.append((layer_name, g))
+    return layers
+
 def build_results_map(df, mcp_results, kde_results, requested_percents, requested_kde_percents):
     """Full map: points/tracks + MCP polygons + KDE raster/contours."""
     m = _base_map(df["latitude"].mean(), df["longitude"].mean(), control_scale=False, zoom=9)
