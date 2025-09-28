@@ -71,10 +71,10 @@ def _home_range_help() -> str:
     return (
         "Estimators available: MCP, KDE, LoCoH, dBBMM.\n\n"
         "Examples:\n"
-        "• I want 100% MCP\n"
-        "• I want 95% KDE\n"
-        "• I want LoCoH 50% and 95%\n"
-        "• I want dBBMM 95%\n\n"
+        "• I want 100 MCP\n"
+        "• I want 95 KDE\n"
+        "• I want LoCoH 50 and 95\n"
+        "• I want dBBMM 95\n\n"
         "Ask me about parameter options anytime."
     )
 
