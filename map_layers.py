@@ -262,7 +262,12 @@ def make_dbbmm_layers(dbbmm_results: dict, animal_ids, color_map, name_prefix="d
     Build per-animal raster + isopleth contours from dBBMM results.
     Accepts per-animal entries as either dicts or DBBMMResult dataclasses.
     """
+    import folium, os, rasterio, numpy as np
+    from pyproj import Transformer
+    import matplotlib.pyplot as plt
+
     layers = []
+
     for animal in animal_ids:
         data = dbbmm_results.get(str(animal)) or dbbmm_results.get(animal)
         if not data:
@@ -278,34 +283,38 @@ def make_dbbmm_layers(dbbmm_results: dict, animal_ids, color_map, name_prefix="d
 
         color = color_map[animal]
 
-        # 1) Raster UD layer (now alpha driven by intensity)
+        # 1) Raster UD layer (alpha driven by intensity with robust stretch)
         if tif_path and os.path.exists(tif_path):
             with rasterio.open(tif_path) as src:
                 arr = src.read(1)
                 arr = np.nan_to_num(arr, nan=0.0)
 
-                # Robust 2–98% percentile stretch to avoid “all dark”
-                q2, q98 = np.percentile(arr, [2, 98])
-                if q98 > q2:
-                    arr_norm = np.clip((arr - q2) / (q98 - q2), 0, 1).astype(np.float32)
+                vals = arr[np.isfinite(arr)]
+                nz = vals[vals > 0]
+                if nz.size >= 10:
+                    lo, hi = np.percentile(nz, [60, 99.5])   # focus on top 40% tail
+                elif vals.size > 0:
+                    lo, hi = np.percentile(vals, [5, 99])
                 else:
-                    a, b = float(arr.min()), float(arr.max())
-                    arr_norm = ((arr - a) / (b - a + 1e-12)).astype(np.float32) if b > a else np.zeros_like(arr, dtype=np.float32)
+                    lo, hi = 0.0, 1.0
 
-                # Alpha mask from intensity:
-                # - suppress tiny values entirely (<2% of norm range)
-                # - ease in with gamma so high-density pops more
-                alpha = arr_norm.copy()
-                alpha[alpha < 0.02] = 0.0
-                alpha = (alpha ** 1.6)  # gamma
+                if hi <= lo:
+                    a, b = float(vals.min()) if vals.size else 0.0, float(vals.max()) if vals.size else 1.0
+                    norm = ((arr - a) / (b - a + 1e-12)).astype(np.float32) if b > a else np.zeros_like(arr, dtype=np.float32)
+                else:
+                    norm = np.clip((arr - lo) / (hi - lo + 1e-12), 0, 1).astype(np.float32)
+
+                # Alpha: keep only the higher-density parts; smooth with gamma
+                alpha = norm.copy()
+                alpha[alpha < 0.12] = 0.0           # drop very low density
+                alpha = alpha ** 0.7                 # gamma -> more visible
                 alpha_u8 = (alpha * 255).astype(np.uint8)
 
-                # Color (any perceptual map). Keep RGB from cmap, but replace A with our alpha
-                cmap = plt.get_cmap("plasma")
-                rgb = (cmap(arr_norm)[..., :3] * 255).astype(np.uint8)
+                # Colorize with a perceptual map and apply our alpha
+                rgb = (plt.get_cmap("plasma")(norm)[..., :3] * 255).astype(np.uint8)
                 rgba = np.dstack([rgb, alpha_u8])
 
-                # Bounds → WGS84
+                # Bounds to WGS84 (EPSG:4326)
                 b = src.bounds
                 src_crs = src.crs.to_string() if src.crs else "EPSG:3857"
                 to_wgs = Transformer.from_crs(src_crs, "EPSG:4326", always_xy=True)
@@ -314,7 +323,7 @@ def make_dbbmm_layers(dbbmm_results: dict, animal_ids, color_map, name_prefix="d
                 south, west, north, east = min(lats), min(lons), max(lats), max(lons)
                 bounds_ll = [[south, west], [north, east]]
 
-                # Debug bounds box (visible) so we always know placement
+                # Debug bounds (visible) so you can confirm placement
                 debug_rect = folium.FeatureGroup(name=f"{animal} {name_prefix} Bounds (debug)", show=True)
                 folium.Polygon(
                     locations=[(south, west), (south, east), (north, east), (north, west), (south, west)],
@@ -322,34 +331,34 @@ def make_dbbmm_layers(dbbmm_results: dict, animal_ids, color_map, name_prefix="d
                 ).add_to(debug_rect)
                 layers.append(debug_rect)
 
-                # Primary raster
+                # Main raster overlay (per-pixel alpha does the work)
                 raster_layer = folium.FeatureGroup(name=f"{animal} {name_prefix} Raster", show=True)
                 raster_layer.add_child(
                     folium.raster_layers.ImageOverlay(
-                        image=rgba,
-                        bounds=bounds_ll,
-                        opacity=1.0,         # let per-pixel alpha control visibility
+                        image=rgba,            # H×W×4 uint8
+                        bounds=bounds_ll,      # [[S,W],[N,E]] in lat/lon
+                        opacity=1.0,           # use our alpha channel
                         interactive=False,
                         zindex=1000,
                     )
                 )
                 layers.append(raster_layer)
 
-                # Optional flip test (keep off unless needed)
+                # Optional flip test (usually off)
                 rgba_flip = np.flipud(rgba)
                 flip_layer = folium.FeatureGroup(name=f"{animal} {name_prefix} Raster (flip test)", show=False)
                 flip_layer.add_child(
                     folium.raster_layers.ImageOverlay(
                         image=rgba_flip,
                         bounds=bounds_ll,
-                        opacity=0.9,
+                        opacity=1.0,
                         interactive=False,
                         zindex=999,
                     )
                 )
                 layers.append(flip_layer)
 
-        # 2) Isopleth polygons (shown by default)
+        # 2) Isopleth polygons
         for item in iso_list:
             percent = int(item.get("percent"))
             geom = item.get("geometry")
