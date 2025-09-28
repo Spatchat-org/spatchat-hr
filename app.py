@@ -16,7 +16,6 @@ import numpy as np
 from storage import (
     get_cached_df, set_cached_df,
     get_cached_headers, set_cached_headers,
-    get_dataset_brief, set_dataset_brief,
     clear_all_results,
     mcp_results, kde_results,
     requested_percents, requested_kde_percents,
@@ -375,15 +374,7 @@ def handle_upload_confirm(x_col, y_col, crs_text):
     df, _ = detect_and_standardize(df)
     set_cached_df(df)
 
-    # Optional: dataset brief for LLM Q&A
-    try:
-        brief = build_dataset_context(df)
-        set_dataset_brief(brief)
-    except Exception as e:
-        print(f"[dataset_brief] skipped: {e}", file=sys.stderr)
-
     return build_preview_map(df)
-
 
 def confirm_and_hint(x_col, y_col, crs_text, chat_history):
     """
