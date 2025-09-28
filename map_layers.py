@@ -261,19 +261,31 @@ def make_dbbmm_layers(dbbmm_results: dict, animal_ids, color_map, name_prefix="d
     """
     Build per-animal raster + isopleth contours from dBBMM results.
     Accepts per-animal entries as either dicts or DBBMMResult dataclasses.
+    Saves a PNG overlay (more reliable than raw arrays) and uses Leaflet opacity.
     """
-    import folium, os, rasterio, numpy as np
-    from pyproj import Transformer
+    import os
+    import folium
+    import numpy as np
+    import rasterio
     import matplotlib.pyplot as plt
+    from pyproj import Transformer
+
+    # Optional PIL for robust PNG writing; fallback to plt.imsave if PIL isn't available
+    try:
+        from PIL import Image
+        _HAS_PIL = True
+    except Exception:
+        _HAS_PIL = False
 
     layers = []
+    os.makedirs("outputs", exist_ok=True)  # ensure we can write PNG overlays
 
     for animal in animal_ids:
         data = dbbmm_results.get(str(animal)) or dbbmm_results.get(animal)
         if not data:
             continue
 
-        # Support both dict and dataclass
+        # Support both dict and dataclass-like
         if isinstance(data, dict):
             tif_path = data.get("geotiff")
             iso_list = data.get("isopleths", []) or []
@@ -283,84 +295,89 @@ def make_dbbmm_layers(dbbmm_results: dict, animal_ids, color_map, name_prefix="d
 
         color = color_map[animal]
 
-        # 1) Raster UD layer (alpha driven by intensity with robust stretch)
+        # 1) Raster UD layer (PNG overlay) — shown by default
         if tif_path and os.path.exists(tif_path):
+            raster_layer = folium.FeatureGroup(name=f"{animal} {name_prefix} Raster", show=True)
             with rasterio.open(tif_path) as src:
-                arr = src.read(1)
+                arr = src.read(1).astype(np.float32)
+                # ---- Debug stats
+                finite_any = np.isfinite(arr).any()
+                arr_min = float(np.nanmin(arr)) if finite_any else float("nan")
+                arr_max = float(np.nanmax(arr)) if finite_any else float("nan")
+                print(f"[dBBMM] {animal} tif={tif_path}")
+                print(f"[dBBMM] arr stats: min={arr_min:.6e}, max={arr_max:.6e}, any_finite={finite_any}")
+
+                # Normalize with gamma to make small values visible
                 arr = np.nan_to_num(arr, nan=0.0)
-
-                vals = arr[np.isfinite(arr)]
-                nz = vals[vals > 0]
-                if nz.size >= 10:
-                    lo, hi = np.percentile(nz, [60, 99.5])   # focus on top 40% tail
-                elif vals.size > 0:
-                    lo, hi = np.percentile(vals, [5, 99])
+                amax = float(arr.max())
+                if amax > 0:
+                    arr_norm = (arr / amax).astype(np.float32)
                 else:
-                    lo, hi = 0.0, 1.0
+                    arr_norm = arr  # all zeros
 
-                if hi <= lo:
-                    a, b = float(vals.min()) if vals.size else 0.0, float(vals.max()) if vals.size else 1.0
-                    norm = ((arr - a) / (b - a + 1e-12)).astype(np.float32) if b > a else np.zeros_like(arr, dtype=np.float32)
-                else:
-                    norm = np.clip((arr - lo) / (hi - lo + 1e-12), 0, 1).astype(np.float32)
+                # Gentle gamma to brighten
+                arr_norm = np.sqrt(arr_norm).astype(np.float32)
 
-                # Alpha: keep only the higher-density parts; smooth with gamma
-                alpha = norm.copy()
-                alpha[alpha < 0.12] = 0.0           # drop very low density
-                alpha = alpha ** 0.7                 # gamma -> more visible
-                alpha_u8 = (alpha * 255).astype(np.uint8)
+                # Map to RGBA via colormap and force alpha=255 (opaque)
+                cmap = plt.get_cmap("viridis")
+                rgba = (cmap(arr_norm) * 255).astype(np.uint8)
+                rgba[:, :, 3] = 255
 
-                # Colorize with a perceptual map and apply our alpha
-                rgb = (plt.get_cmap("plasma")(norm)[..., :3] * 255).astype(np.uint8)
-                rgba = np.dstack([rgb, alpha_u8])
-
-                # Bounds to WGS84 (EPSG:4326)
+                # Compute WGS84 bounds for the overlay using the raster CRS
                 b = src.bounds
                 src_crs = src.crs.to_string() if src.crs else "EPSG:3857"
                 to_wgs = Transformer.from_crs(src_crs, "EPSG:4326", always_xy=True)
-                pts_ll = [to_wgs.transform(x, y) for x, y in [(b.left, b.bottom), (b.left, b.top), (b.right, b.bottom), (b.right, b.top)]]
-                lons = [p[0] for p in pts_ll]; lats = [p[1] for p in pts_ll]
+                # Four corners in source CRS -> WGS84 (lon, lat)
+                pts_m = [(b.left, b.bottom), (b.left, b.top), (b.right, b.bottom), (b.right, b.top)]
+                pts_ll = [to_wgs.transform(x, y) for x, y in pts_m]  # -> (lon, lat)
+
+                lons = [p[0] for p in pts_ll]
+                lats = [p[1] for p in pts_ll]
                 south, west, north, east = min(lats), min(lons), max(lats), max(lons)
                 bounds_ll = [[south, west], [north, east]]
 
-                # Debug bounds (visible) so you can confirm placement
-                debug_rect = folium.FeatureGroup(name=f"{animal} {name_prefix} Bounds (debug)", show=True)
+                print(f"[dBBMM] {animal} overlay bounds WGS84: SW={bounds_ll[0]} NE={bounds_ll[1]}")
+
+                # Save PNG to disk (folium will embed as data URI)
+                png_path = os.path.join("outputs", f"dbbmm_{str(animal).replace(' ', '_')}.png")
+                try:
+                    if _HAS_PIL:
+                        Image.fromarray(rgba, mode="RGBA").save(png_path, "PNG", optimize=True)
+                    else:
+                        # Fallback: matplotlib writer
+                        plt.imsave(png_path, rgba)
+                except Exception as e:
+                    print(f"[dBBMM] {animal} PNG save error: {e}")
+
+                print(f"[dBBMM] {animal} png saved: {png_path} (exists={os.path.exists(png_path)})")
+
+                # Optional: draw a debug rectangle around the bounds
+                debug_rect = folium.FeatureGroup(name=f"{animal} dBBMM Bounds (debug)", show=False)
                 folium.Polygon(
                     locations=[(south, west), (south, east), (north, east), (north, west), (south, west)],
                     color="#8844ff", weight=2, fill=False, opacity=0.9
                 ).add_to(debug_rect)
                 layers.append(debug_rect)
 
-                # Main raster overlay (per-pixel alpha does the work)
-                raster_layer = folium.FeatureGroup(name=f"{animal} {name_prefix} Raster", show=True)
+                # Add the image overlay
                 raster_layer.add_child(
                     folium.raster_layers.ImageOverlay(
-                        image=rgba,            # H×W×4 uint8
-                        bounds=bounds_ll,      # [[S,W],[N,E]] in lat/lon
-                        opacity=1.0,           # use our alpha channel
+                        image=png_path,
+                        bounds=bounds_ll,
+                        opacity=0.85,    # use Leaflet opacity (alpha in file is 255)
                         interactive=False,
                         zindex=1000,
                     )
                 )
-                layers.append(raster_layer)
 
-                # Optional flip test (usually off)
-                rgba_flip = np.flipud(rgba)
-                flip_layer = folium.FeatureGroup(name=f"{animal} {name_prefix} Raster (flip test)", show=False)
-                flip_layer.add_child(
-                    folium.raster_layers.ImageOverlay(
-                        image=rgba_flip,
-                        bounds=bounds_ll,
-                        opacity=1.0,
-                        interactive=False,
-                        zindex=999,
-                    )
-                )
-                layers.append(flip_layer)
+            layers.append(raster_layer)
 
-        # 2) Isopleth polygons
+        # 2) Isopleth polygons (shown by default)
         for item in iso_list:
-            percent = int(item.get("percent"))
+            try:
+                percent = int(item.get("percent"))
+            except Exception:
+                continue
             geom = item.get("geometry")
             area_km2 = float(item.get("area_sq_km", 0.0))
             layer = folium.FeatureGroup(name=f"{animal} {name_prefix} {percent}%", show=True)
@@ -371,7 +388,11 @@ def make_dbbmm_layers(dbbmm_results: dict, animal_ids, color_map, name_prefix="d
                         "properties": {"animal_id": str(animal), "percent": percent, "area_km2": round(area_km2, 3)},
                         "geometry": geom,
                     },
-                    style_function=lambda _feat, color=color: {"fillOpacity": 0.25, "weight": 2, "color": color},
+                    style_function=lambda _feat, color=color: {
+                        "fillOpacity": 0.25,
+                        "weight": 2,
+                        "color": color,
+                    },
                     tooltip=folium.GeoJsonTooltip(
                         fields=["animal_id", "percent", "area_km2"],
                         aliases=["Animal", "Isopleth (%)", "Area (km²)"],
@@ -379,6 +400,8 @@ def make_dbbmm_layers(dbbmm_results: dict, animal_ids, color_map, name_prefix="d
                     ),
                 ).add_to(layer)
             layers.append(layer)
+
+        print(f"[dBBMM] {animal}: n_isopleth_features={len(iso_list)}")
 
     return layers
 
