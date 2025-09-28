@@ -55,8 +55,8 @@ def compute_dbbmm(
         params = DBBMMParams()
 
     # Use Web Mercator for a globally valid meter-based grid.
-    to_eq = Transformer.from_crs(4326, 3857, always_xy=True)   # lon/lat -> meters
-    to_wgs = Transformer.from_crs(3857, 4326, always_xy=True)  # meters -> lon/lat
+    to_eq  = Transformer.from_crs(4326, 3857, always_xy=True)  # lon/lat -> Web Mercator (m)
+    to_wgs = Transformer.from_crs(3857, 4326, always_xy=True)  # Web Mercator -> lon/lat
 
     def reproj_geom(geom):
         return shp_transform(lambda x, y, z=None: to_wgs.transform(x, y), geom)
