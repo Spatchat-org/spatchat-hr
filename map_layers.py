@@ -278,38 +278,43 @@ def make_dbbmm_layers(dbbmm_results: dict, animal_ids, color_map, name_prefix="d
 
         color = color_map[animal]
 
-        # 1) Raster UD layer (shown by default)
+        # 1) Raster UD layer (now alpha driven by intensity)
         if tif_path and os.path.exists(tif_path):
             with rasterio.open(tif_path) as src:
                 arr = src.read(1)
-                # NaN-safe + percentile stretch to avoid “all transparent” look
-                if not np.isfinite(arr).any():
-                    arr = np.zeros_like(arr, dtype=np.float32)
                 arr = np.nan_to_num(arr, nan=0.0)
 
-                # use 2–98% stretch
-                q2, q98 = np.percentile(arr.flatten(), [2, 98])
+                # Robust 2–98% percentile stretch to avoid “all dark”
+                q2, q98 = np.percentile(arr, [2, 98])
                 if q98 > q2:
-                    arr_norm = np.clip((arr - q2) / (q98 - q2), 0, 1)
+                    arr_norm = np.clip((arr - q2) / (q98 - q2), 0, 1).astype(np.float32)
                 else:
                     a, b = float(arr.min()), float(arr.max())
-                    arr_norm = (arr - a) / (b - a + 1e-12) if b > a else np.zeros_like(arr, dtype=np.float32)
+                    arr_norm = ((arr - a) / (b - a + 1e-12)).astype(np.float32) if b > a else np.zeros_like(arr, dtype=np.float32)
 
+                # Alpha mask from intensity:
+                # - suppress tiny values entirely (<2% of norm range)
+                # - ease in with gamma so high-density pops more
+                alpha = arr_norm.copy()
+                alpha[alpha < 0.02] = 0.0
+                alpha = (alpha ** 1.6)  # gamma
+                alpha_u8 = (alpha * 255).astype(np.uint8)
+
+                # Color (any perceptual map). Keep RGB from cmap, but replace A with our alpha
                 cmap = plt.get_cmap("plasma")
-                rgba = (cmap(arr_norm) * 255).astype(np.uint8)
+                rgb = (cmap(arr_norm)[..., :3] * 255).astype(np.uint8)
+                rgba = np.dstack([rgb, alpha_u8])
 
-                # --- transform bounds from raster CRS -> WGS84 ---
+                # Bounds → WGS84
                 b = src.bounds
                 src_crs = src.crs.to_string() if src.crs else "EPSG:3857"
                 to_wgs = Transformer.from_crs(src_crs, "EPSG:4326", always_xy=True)
-                # 4 corners (lon,lat)
                 pts_ll = [to_wgs.transform(x, y) for x, y in [(b.left, b.bottom), (b.left, b.top), (b.right, b.bottom), (b.right, b.top)]]
-                lons = [p[0] for p in pts_ll]
-                lats = [p[1] for p in pts_ll]
+                lons = [p[0] for p in pts_ll]; lats = [p[1] for p in pts_ll]
                 south, west, north, east = min(lats), min(lons), max(lats), max(lons)
                 bounds_ll = [[south, west], [north, east]]
 
-                # Visible debug bounds box so you can confirm placement
+                # Debug bounds box (visible) so we always know placement
                 debug_rect = folium.FeatureGroup(name=f"{animal} {name_prefix} Bounds (debug)", show=True)
                 folium.Polygon(
                     locations=[(south, west), (south, east), (north, east), (north, west), (south, west)],
@@ -317,27 +322,27 @@ def make_dbbmm_layers(dbbmm_results: dict, animal_ids, color_map, name_prefix="d
                 ).add_to(debug_rect)
                 layers.append(debug_rect)
 
-                img = np.dstack([rgba[:, :, 0], rgba[:, :, 1], rgba[:, :, 2], rgba[:, :, 3].astype(np.uint8)])
+                # Primary raster
                 raster_layer = folium.FeatureGroup(name=f"{animal} {name_prefix} Raster", show=True)
                 raster_layer.add_child(
                     folium.raster_layers.ImageOverlay(
-                        image=img,
+                        image=rgba,
                         bounds=bounds_ll,
-                        opacity=0.88,
+                        opacity=1.0,         # let per-pixel alpha control visibility
                         interactive=False,
                         zindex=1000,
                     )
                 )
                 layers.append(raster_layer)
 
-                # Optional flip test (helps diagnose row-direction issues)
-                img_flip = np.flipud(img)
+                # Optional flip test (keep off unless needed)
+                rgba_flip = np.flipud(rgba)
                 flip_layer = folium.FeatureGroup(name=f"{animal} {name_prefix} Raster (flip test)", show=False)
                 flip_layer.add_child(
                     folium.raster_layers.ImageOverlay(
-                        image=img_flip,
+                        image=rgba_flip,
                         bounds=bounds_ll,
-                        opacity=0.6,
+                        opacity=0.9,
                         interactive=False,
                         zindex=999,
                     )
@@ -352,7 +357,11 @@ def make_dbbmm_layers(dbbmm_results: dict, animal_ids, color_map, name_prefix="d
             layer = folium.FeatureGroup(name=f"{animal} {name_prefix} {percent}%", show=True)
             if geom:
                 folium.GeoJson(
-                    data={"type": "Feature", "properties": {"animal_id": str(animal), "percent": percent, "area_km2": round(area_km2, 3)}, "geometry": geom},
+                    data={
+                        "type": "Feature",
+                        "properties": {"animal_id": str(animal), "percent": percent, "area_km2": round(area_km2, 3)},
+                        "geometry": geom,
+                    },
                     style_function=lambda _feat, color=color: {"fillOpacity": 0.25, "weight": 2, "color": color},
                     tooltip=folium.GeoJsonTooltip(
                         fields=["animal_id", "percent", "area_km2"],
