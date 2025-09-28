@@ -24,7 +24,6 @@ def _base_map(center_lat, center_lon, control_scale=True, zoom=9):
     ).add_to(m)
     return m
 
-
 def build_preview_map(df):
     """Points + (optional) tracks, layer control, zoom to data."""
     has_timestamp = "timestamp" in df.columns
@@ -63,8 +62,7 @@ def build_preview_map(df):
     m = fit_map_to_bounds(m, df)
     return m._repr_html_()
 
-
-# ---------- Small, focused builders ----------
+# ---------- New small builders ----------
 
 def make_points_tracks_layers(df, color_map):
     """Return (points_layer, tracks_layer) FeatureGroups."""
@@ -92,7 +90,6 @@ def make_points_tracks_layers(df, color_map):
             ).add_to(points_layer)
     return points_layer, tracks_layer
 
-
 def make_mcp_layers(mcp_results, requested_percents, animal_ids, color_map):
     """Return a list of FeatureGroups for MCP polygons."""
     layers = []
@@ -114,7 +111,6 @@ def make_mcp_layers(mcp_results, requested_percents, animal_ids, color_map):
                 layers.append(layer)
     return layers
 
-
 def make_kde_layers(kde_results, requested_kde_percents, animal_ids, color_map):
     """Return a list of FeatureGroups for KDE raster + contour layers."""
     layers = []
@@ -128,7 +124,13 @@ def make_kde_layers(kde_results, requested_kde_percents, animal_ids, color_map):
             raster_layer = folium.FeatureGroup(name=f"{animal} KDE Raster", show=True)
             with rasterio.open(v["geotiff"]) as src:
                 arr = src.read(1)
-                arr_norm = (arr - arr.min()) / (arr.max() - arr.min() + 1e-10)
+                arr = np.nan_to_num(arr, nan=0.0)
+                # simple min-max stretch
+                a, b = float(arr.min()), float(arr.max())
+                if b > a:
+                    arr_norm = (arr - a) / (b - a)
+                else:
+                    arr_norm = np.zeros_like(arr, dtype=np.float32)
                 cmap = plt.get_cmap('plasma')
                 rgba = (cmap(arr_norm) * 255).astype(np.uint8)
                 bounds = src.bounds
@@ -175,7 +177,6 @@ def make_kde_layers(kde_results, requested_kde_percents, animal_ids, color_map):
             layers.append(contour_layer)
     return layers
 
-
 def make_locoh_layers(locoh_result: dict, animal_ids, color_map, name_prefix: str = "LoCoH"):
     """Envelopes at requested isopleths (e.g., 50/95). Visible by default."""
     layers = []
@@ -190,11 +191,7 @@ def make_locoh_layers(locoh_result: dict, animal_ids, color_map, name_prefix: st
             area_km2 = float(item.get("area_sq_km", 0.0))
             feature = {
                 "type": "Feature",
-                "properties": {
-                    "animal_id": str(animal),
-                    "isopleth": iso,
-                    "area_km2": round(area_km2, 3),
-                },
+                "properties": {"animal_id": str(animal), "isopleth": iso, "area_km2": round(area_km2, 3)},
                 "geometry": gj_geom,
             }
             layer = folium.FeatureGroup(name=f"{animal} {name_prefix} {iso}%", show=True)
@@ -215,19 +212,11 @@ def make_locoh_layers(locoh_result: dict, animal_ids, color_map, name_prefix: st
             layers.append(layer)
     return layers
 
-
 def make_locoh_facets_layers(locoh_result: dict, animal_ids, color_map, name_prefix: str = "LoCoH facets"):
-    """Render individual local convex hulls ("facets") colored by cumulative % (red→yellow)."""
+    """Local hull “facets” colored by cumulative percent (red→yellow). Visible by default."""
     # bins & palette (deep red → pale yellow)
     bins = [20, 40, 60, 80, 95, 100]
-    palette = {
-        20: "#d7301f",
-        40: "#ef6548",
-        60: "#fc8d59",
-        80: "#fdbb84",
-        95: "#fdd49e",
-        100:"#fee8c8",
-    }
+    palette = {20:"#d7301f", 40:"#ef6548", 60:"#fc8d59", 80:"#fdbb84", 95:"#fdd49e", 100:"#fee8c8"}
     def color_for(pct: int) -> str:
         for b in bins:
             if pct <= b:
@@ -250,26 +239,15 @@ def make_locoh_facets_layers(locoh_result: dict, animal_ids, color_map, name_pre
             area = float(f.get("area_sq_km", 0.0))
             features.append({
                 "type": "Feature",
-                "properties": {
-                    "animal_id": str(animal),
-                    "cum_percent": pct,
-                    "area_km2": round(area, 3),
-                    "_fill": color_for(pct),
-                },
+                "properties": {"animal_id": str(animal), "cum_percent": pct, "area_km2": round(area, 3), "_fill": color_for(pct)},
                 "geometry": f["geometry"],
             })
-
         fc = {"type": "FeatureCollection", "features": features}
         layer = folium.FeatureGroup(name=f"{animal} {name_prefix}", show=True)
         folium.GeoJson(
             data=fc,
             name=f"{name_prefix} — {animal}",
-            style_function=lambda feat: {
-                "fillOpacity": 0.6,
-                "weight": 1,
-                "color": "#222222",
-                "fillColor": feat["properties"]["_fill"],
-            },
+            style_function=lambda feat: {"fillOpacity": 0.6, "weight": 1, "color": "#222222", "fillColor": feat["properties"]["_fill"]},
             tooltip=folium.GeoJsonTooltip(
                 fields=["animal_id", "cum_percent", "area_km2"],
                 aliases=["Animal", "Cum. %", "Hull area (km²)"],
@@ -279,14 +257,12 @@ def make_locoh_facets_layers(locoh_result: dict, animal_ids, color_map, name_pre
         layers.append(layer)
     return layers
 
-
 def make_dbbmm_layers(dbbmm_results: dict, animal_ids, color_map, name_prefix="dBBMM"):
     """
     Build per-animal raster + isopleth contours from dBBMM results.
     Accepts per-animal entries as either dicts or DBBMMResult dataclasses.
     """
     layers = []
-
     for animal in animal_ids:
         data = dbbmm_results.get(str(animal)) or dbbmm_results.get(animal)
         if not data:
@@ -304,65 +280,69 @@ def make_dbbmm_layers(dbbmm_results: dict, animal_ids, color_map, name_prefix="d
 
         # 1) Raster UD layer (shown by default)
         if tif_path and os.path.exists(tif_path):
-            raster_layer = folium.FeatureGroup(name=f"{animal} {name_prefix} Raster", show=True)
             with rasterio.open(tif_path) as src:
                 arr = src.read(1)
+                # NaN-safe + percentile stretch to avoid “all transparent” look
+                if not np.isfinite(arr).any():
+                    arr = np.zeros_like(arr, dtype=np.float32)
+                arr = np.nan_to_num(arr, nan=0.0)
 
-                # Debug stats
-                print(f"[dBBMM] {animal}: raster shape={arr.shape}, max={np.nanmax(arr) if np.isfinite(arr).any() else 'nan'}")
+                # use 2–98% stretch
+                q2, q98 = np.percentile(arr.flatten(), [2, 98])
+                if q98 > q2:
+                    arr_norm = np.clip((arr - q2) / (q98 - q2), 0, 1)
+                else:
+                    a, b = float(arr.min()), float(arr.max())
+                    arr_norm = (arr - a) / (b - a + 1e-12) if b > a else np.zeros_like(arr, dtype=np.float32)
 
-                if np.isfinite(arr).any() and float(np.nanmax(arr)) > 0:
-                    # normalize 0..1
-                    arr = np.nan_to_num(arr, nan=0.0)
-                    arr_norm = (arr - arr.min()) / (arr.max() - arr.min() + 1e-12)
+                cmap = plt.get_cmap("plasma")
+                rgba = (cmap(arr_norm) * 255).astype(np.uint8)
 
-                    # --- optional visibility tweak: drop faint values ---
-                    arr_norm[arr_norm < 0.02] = 0.0
+                # --- transform bounds from raster CRS -> WGS84 ---
+                b = src.bounds
+                src_crs = src.crs.to_string() if src.crs else "EPSG:3857"
+                to_wgs = Transformer.from_crs(src_crs, "EPSG:4326", always_xy=True)
+                # 4 corners (lon,lat)
+                pts_ll = [to_wgs.transform(x, y) for x, y in [(b.left, b.bottom), (b.left, b.top), (b.right, b.bottom), (b.right, b.top)]]
+                lons = [p[0] for p in pts_ll]
+                lats = [p[1] for p in pts_ll]
+                south, west, north, east = min(lats), min(lons), max(lats), max(lons)
+                bounds_ll = [[south, west], [north, east]]
 
-                    cmap = plt.get_cmap("plasma")
-                    rgba = (cmap(arr_norm) * 255).astype(np.uint8)
+                # Visible debug bounds box so you can confirm placement
+                debug_rect = folium.FeatureGroup(name=f"{animal} {name_prefix} Bounds (debug)", show=True)
+                folium.Polygon(
+                    locations=[(south, west), (south, east), (north, east), (north, west), (south, west)],
+                    color="#8844ff", weight=2, fill=False, opacity=0.9
+                ).add_to(debug_rect)
+                layers.append(debug_rect)
 
-                    # --- transform ALL 4 corners from raster CRS -> WGS84 (EPSG:4326) ---
-                    b = src.bounds
-                    src_crs = src.crs.to_string() if src.crs else "EPSG:3857"
-                    to_wgs = Transformer.from_crs(src_crs, "EPSG:4326", always_xy=True)
-                    pts_m = [(b.left, b.bottom), (b.left, b.top), (b.right, b.bottom), (b.right, b.top)]
-                    pts_ll = [to_wgs.transform(x, y) for x, y in pts_m]  # (lon, lat)
-                    lons = [p[0] for p in pts_ll]
-                    lats = [p[1] for p in pts_ll]
-                    south, west, north, east = min(lats), min(lons), max(lats), max(lons)
-                    bounds_ll = [[south, west], [north, east]]
-
-                    print(f"[dBBMM] {animal}: bounds_ll SW=({south:.6f},{west:.6f}) NE=({north:.6f},{east:.6f})")
-
-                    # Debug rectangle for overlay bounds (toggle off by default)
-                    debug_rect = folium.FeatureGroup(name=f"{animal} dBBMM Bounds (debug)", show=False)
-                    folium.Polygon(
-                        locations=[(south, west), (south, east), (north, east), (north, west), (south, west)],
-                        color="#8844ff", weight=2, fill=False, opacity=0.9
-                    ).add_to(debug_rect)
-                    layers.append(debug_rect)
-
-                    img = np.dstack([
-                        rgba[:, :, 0], rgba[:, :, 1], rgba[:, :, 2],
-                        (rgba[:, :, 3]).astype(np.uint8)
-                    ])
-
-                    # If image appears inverted (rare), flip vertically:
-                    # img = np.flipud(img)
-
-                    raster_layer.add_child(
-                        folium.raster_layers.ImageOverlay(
-                            image=img,
-                            bounds=bounds_ll,
-                            opacity=0.88,
-                            interactive=False,
-                            zindex=1000,  # keep above other overlays
-                        )
+                img = np.dstack([rgba[:, :, 0], rgba[:, :, 1], rgba[:, :, 2], rgba[:, :, 3].astype(np.uint8)])
+                raster_layer = folium.FeatureGroup(name=f"{animal} {name_prefix} Raster", show=True)
+                raster_layer.add_child(
+                    folium.raster_layers.ImageOverlay(
+                        image=img,
+                        bounds=bounds_ll,
+                        opacity=0.88,
+                        interactive=False,
+                        zindex=1000,
                     )
-            layers.append(raster_layer)
+                )
+                layers.append(raster_layer)
 
-        print(f"[dBBMM] {animal}: n_isopleth_features={len(iso_list)}")
+                # Optional flip test (helps diagnose row-direction issues)
+                img_flip = np.flipud(img)
+                flip_layer = folium.FeatureGroup(name=f"{animal} {name_prefix} Raster (flip test)", show=False)
+                flip_layer.add_child(
+                    folium.raster_layers.ImageOverlay(
+                        image=img_flip,
+                        bounds=bounds_ll,
+                        opacity=0.6,
+                        interactive=False,
+                        zindex=999,
+                    )
+                )
+                layers.append(flip_layer)
 
         # 2) Isopleth polygons (shown by default)
         for item in iso_list:
@@ -372,16 +352,8 @@ def make_dbbmm_layers(dbbmm_results: dict, animal_ids, color_map, name_prefix="d
             layer = folium.FeatureGroup(name=f"{animal} {name_prefix} {percent}%", show=True)
             if geom:
                 folium.GeoJson(
-                    data={
-                        "type": "Feature",
-                        "properties": {"animal_id": str(animal), "percent": percent, "area_km2": round(area_km2, 3)},
-                        "geometry": geom,
-                    },
-                    style_function=lambda _feat, color=color: {
-                        "fillOpacity": 0.25,
-                        "weight": 2,
-                        "color": color,
-                    },
+                    data={"type": "Feature", "properties": {"animal_id": str(animal), "percent": percent, "area_km2": round(area_km2, 3)}, "geometry": geom},
+                    style_function=lambda _feat, color=color: {"fillOpacity": 0.25, "weight": 2, "color": color},
                     tooltip=folium.GeoJsonTooltip(
                         fields=["animal_id", "percent", "area_km2"],
                         aliases=["Animal", "Isopleth (%)", "Area (km²)"],
@@ -391,7 +363,6 @@ def make_dbbmm_layers(dbbmm_results: dict, animal_ids, color_map, name_prefix="d
             layers.append(layer)
 
     return layers
-
 
 # ---------- Composition entrypoint ----------
 
