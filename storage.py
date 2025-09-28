@@ -45,7 +45,6 @@ cached_headers = []
 
 # --- transient detection summary for chat ---
 last_detection_summary = ""
-_dataset_brief = ""
 
 # ---- Accessors expected by app.py ----
 def get_cached_df():
@@ -61,13 +60,6 @@ def get_cached_headers():
 def set_cached_headers(headers):
     global cached_headers
     cached_headers = list(headers or [])
-
-def set_dataset_brief(text: str):
-    global _dataset_brief
-    _dataset_brief = text or ""
-
-def get_dataset_brief() -> str:
-    return _dataset_brief
 
 def set_detection_summary(text: str):
     global last_detection_summary
