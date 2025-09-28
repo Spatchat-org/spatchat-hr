@@ -257,127 +257,79 @@ def make_locoh_facets_layers(locoh_result: dict, animal_ids, color_map, name_pre
         layers.append(layer)
     return layers
 
-def make_dbbmm_layers(dbbmm_results: dict, animal_ids, color_map, name_prefix="dBBMM"):
+def make_dbbmm_layers(dbbmm_results: dict, animal_ids, color_map, name_prefix: str = "dBBMM"):
     """
-    Build per-animal raster + isopleth contours from dBBMM results.
-    Accepts per-animal entries as either dicts or DBBMMResult dataclasses.
-    Saves a PNG overlay (more reliable than raw arrays) and uses Leaflet opacity.
+    Build per-animal raster + isopleth layers for dBBMM results.
+    Expects each animal entry to be either a dict or a DBBMMResult with:
+      - geotiff: path to EPSG:3857 GeoTIFF UD
+      - isopleths: [{percent, area_sq_km, geometry (GeoJSON in WGS84)}, ...]
     """
-    import os
-    import folium
-    import numpy as np
-    import rasterio
-    import matplotlib.pyplot as plt
-    from pyproj import Transformer
-
-    # Optional PIL for robust PNG writing; fallback to plt.imsave if PIL isn't available
-    try:
-        from PIL import Image
-        _HAS_PIL = True
-    except Exception:
-        _HAS_PIL = False
-
     layers = []
-    os.makedirs("outputs", exist_ok=True)  # ensure we can write PNG overlays
 
     for animal in animal_ids:
         data = dbbmm_results.get(str(animal)) or dbbmm_results.get(animal)
         if not data:
             continue
 
-        # Support both dict and dataclass-like
+        # Support both dict and dataclass-like objects
         if isinstance(data, dict):
             tif_path = data.get("geotiff")
-            iso_list = data.get("isopleths", []) or []
+            iso_list = data.get("isopleths") or []
         else:
             tif_path = getattr(data, "geotiff", None)
             iso_list = getattr(data, "isopleths", []) or []
 
         color = color_map[animal]
 
-        # 1) Raster UD layer (PNG overlay) — shown by default
+        # 1) UD raster overlay (shown by default)
         if tif_path and os.path.exists(tif_path):
             raster_layer = folium.FeatureGroup(name=f"{animal} {name_prefix} Raster", show=True)
             with rasterio.open(tif_path) as src:
                 arr = src.read(1).astype(np.float32)
-                # ---- Debug stats
-                finite_any = np.isfinite(arr).any()
-                arr_min = float(np.nanmin(arr)) if finite_any else float("nan")
-                arr_max = float(np.nanmax(arr)) if finite_any else float("nan")
-                print(f"[dBBMM] {animal} tif={tif_path}")
-                print(f"[dBBMM] arr stats: min={arr_min:.6e}, max={arr_max:.6e}, any_finite={finite_any}")
 
-                # Normalize with gamma to make small values visible
-                arr = np.nan_to_num(arr, nan=0.0)
-                amax = float(arr.max())
-                if amax > 0:
-                    arr_norm = (arr / amax).astype(np.float32)
+                # Normalize to [0,1] if there is signal
+                if np.isfinite(arr).any():
+                    amax = float(np.nanmax(arr))
+                    amin = float(np.nanmin(arr))
                 else:
-                    arr_norm = arr  # all zeros
+                    amax = amin = 0.0
 
-                # Gentle gamma to brighten
-                arr_norm = np.sqrt(arr_norm).astype(np.float32)
+                if amax > amin:
+                    arr = np.nan_to_num(arr, nan=0.0)
+                    arr_norm = (arr - amin) / (amax - amin)
 
-                # Map to RGBA via colormap and force alpha=255 (opaque)
-                cmap = plt.get_cmap("viridis")
-                rgba = (cmap(arr_norm) * 255).astype(np.uint8)
-                rgba[:, :, 3] = 255
+                    cmap = plt.get_cmap("plasma")
+                    rgba = (cmap(arr_norm) * 255).astype(np.uint8)
 
-                # Compute WGS84 bounds for the overlay using the raster CRS
-                b = src.bounds
-                src_crs = src.crs.to_string() if src.crs else "EPSG:3857"
-                to_wgs = Transformer.from_crs(src_crs, "EPSG:4326", always_xy=True)
-                # Four corners in source CRS -> WGS84 (lon, lat)
-                pts_m = [(b.left, b.bottom), (b.left, b.top), (b.right, b.bottom), (b.right, b.top)]
-                pts_ll = [to_wgs.transform(x, y) for x, y in pts_m]  # -> (lon, lat)
+                    # Bounds → WGS84
+                    b = src.bounds
+                    src_crs = src.crs.to_string() if src.crs else "EPSG:3857"
+                    to_wgs = Transformer.from_crs(src_crs, "EPSG:4326", always_xy=True)
+                    pts = [(b.left, b.bottom), (b.left, b.top), (b.right, b.bottom), (b.right, b.top)]
+                    ll = [to_wgs.transform(x, y) for x, y in pts]  # (lon, lat)
+                    west = min(p[0] for p in ll); east = max(p[0] for p in ll)
+                    south = min(p[1] for p in ll); north = max(p[1] for p in ll)
+                    bounds_ll = [[south, west], [north, east]]
 
-                lons = [p[0] for p in pts_ll]
-                lats = [p[1] for p in pts_ll]
-                south, west, north, east = min(lats), min(lons), max(lats), max(lons)
-                bounds_ll = [[south, west], [north, east]]
+                    # RGBA image for Leaflet
+                    img = np.dstack([
+                        rgba[:, :, 0], rgba[:, :, 1], rgba[:, :, 2],
+                        rgba[:, :, 3].astype(np.uint8)
+                    ])
 
-                print(f"[dBBMM] {animal} overlay bounds WGS84: SW={bounds_ll[0]} NE={bounds_ll[1]}")
-
-                # Save PNG to disk (folium will embed as data URI)
-                png_path = os.path.join("outputs", f"dbbmm_{str(animal).replace(' ', '_')}.png")
-                try:
-                    if _HAS_PIL:
-                        Image.fromarray(rgba, mode="RGBA").save(png_path, "PNG", optimize=True)
-                    else:
-                        # Fallback: matplotlib writer
-                        plt.imsave(png_path, rgba)
-                except Exception as e:
-                    print(f"[dBBMM] {animal} PNG save error: {e}")
-
-                print(f"[dBBMM] {animal} png saved: {png_path} (exists={os.path.exists(png_path)})")
-
-                # Optional: draw a debug rectangle around the bounds
-                debug_rect = folium.FeatureGroup(name=f"{animal} dBBMM Bounds (debug)", show=False)
-                folium.Polygon(
-                    locations=[(south, west), (south, east), (north, east), (north, west), (south, west)],
-                    color="#8844ff", weight=2, fill=False, opacity=0.9
-                ).add_to(debug_rect)
-                layers.append(debug_rect)
-
-                # Add the image overlay
-                raster_layer.add_child(
-                    folium.raster_layers.ImageOverlay(
-                        image=png_path,
-                        bounds=bounds_ll,
-                        opacity=0.85,    # use Leaflet opacity (alpha in file is 255)
-                        interactive=False,
-                        zindex=1000,
+                    raster_layer.add_child(
+                        folium.raster_layers.ImageOverlay(
+                            image=img,
+                            bounds=bounds_ll,
+                            opacity=0.80,
+                            interactive=False,
+                        )
                     )
-                )
-
-            layers.append(raster_layer)
+                    layers.append(raster_layer)
 
         # 2) Isopleth polygons (shown by default)
         for item in iso_list:
-            try:
-                percent = int(item.get("percent"))
-            except Exception:
-                continue
+            percent = int(item.get("percent"))
             geom = item.get("geometry")
             area_km2 = float(item.get("area_sq_km", 0.0))
             layer = folium.FeatureGroup(name=f"{animal} {name_prefix} {percent}%", show=True)
@@ -385,7 +337,11 @@ def make_dbbmm_layers(dbbmm_results: dict, animal_ids, color_map, name_prefix="d
                 folium.GeoJson(
                     data={
                         "type": "Feature",
-                        "properties": {"animal_id": str(animal), "percent": percent, "area_km2": round(area_km2, 3)},
+                        "properties": {
+                            "animal_id": str(animal),
+                            "percent": percent,
+                            "area_km2": round(area_km2, 3),
+                        },
                         "geometry": geom,
                     },
                     style_function=lambda _feat, color=color: {
@@ -400,8 +356,6 @@ def make_dbbmm_layers(dbbmm_results: dict, animal_ids, color_map, name_prefix="d
                     ),
                 ).add_to(layer)
             layers.append(layer)
-
-        print(f"[dBBMM] {animal}: n_isopleth_features={len(iso_list)}")
 
     return layers
 
