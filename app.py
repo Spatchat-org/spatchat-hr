@@ -67,6 +67,17 @@ def _json_safe(x):
         return {k: _json_safe(v) for k, v in x.items()}
     return x
 
+def _home_range_help() -> str:
+    return (
+        "Estimators available: MCP, KDE, LoCoH, dBBMM.\n\n"
+        "Examples:\n"
+        "• I want 100% MCP\n"
+        "• I want 95% KDE\n"
+        "• I want LoCoH 50% and 95%\n"
+        "• I want dBBMM 95%\n\n"
+        "Ask me about parameter options anytime."
+    )
+
 def parse_kv_tokens(text: str) -> dict:
     """
     Parse key=value tokens without breaking comma-separated lists.
@@ -226,13 +237,7 @@ def handle_upload_initial(file):
         )
         if tips:
             msg += "You can correct me in chat:\n" + "\n".join(f"  - {t}" for t in tips) + "\n\n"
-        msg += (
-            "You may now create home ranges. For example:\n"
-            "• “I want 100% MCP”\n"
-            "• “I want 95 KDE”\n"
-            "• “MCP 95 50”\n"
-            "• “locoh k=10 isopleths=50,95”\n"
-        )
+        msg += _home_range_help()
 
         return [
             [{"role": "assistant", "content": msg}],
@@ -286,13 +291,7 @@ def handle_upload_initial(file):
         )
         if tips:
             msg += "You can correct me in chat:\n" + "\n".join(f"  - {t}" for t in tips) + "\n\n"
-        msg += (
-            "You may now create home ranges. For example:\n"
-            "• “I want 100% MCP”\n"
-            "• “I want 95 KDE”\n"
-            "• “MCP 95 50”\n"
-            "• “locoh k=10 isopleths=50,95”\n"
-        )
+        msg += _home_range_help()
 
         return [
             [{"role": "assistant", "content": msg}],
@@ -394,13 +393,7 @@ def confirm_and_hint(x_col, y_col, crs_text, chat_history):
     map_html = handle_upload_confirm(x_col, y_col, crs_text)
 
     # If handle_upload_confirm returned an error snippet, we still add guidance.
-    guidance = (
-        "Settings confirmed. You may now create home ranges. For example:\n"
-        "• “I want 100% MCP”\n"
-        "• “I want 95 KDE”\n"
-        "• “MCP 95 50”\n"
-        "• “locoh k=10 isopleths=50,95”"
-    )
+    guidance = _home_range_help()
     chat = list(chat_history)
     chat.append({"role": "assistant", "content": guidance})
     return map_html, chat
