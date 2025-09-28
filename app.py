@@ -116,6 +116,22 @@ def _current_dataset_context():
     except Exception:
         return {"empty": True}
 
+# --- NEW: permissive level parser for MCP (allows 100) ------------------------------
+def _parse_levels_allow_100(text: str) -> list[int]:
+    """
+    Extracts integers 1..100 (inclusive) from free text, preserving order and de-duplicating.
+    Does NOT clamp 100 to 99 (unlike some existing helpers used for KDE).
+    """
+    # match 100 or 0..99 with word boundaries; avoids catching years like 2020
+    raw = re.findall(r'\b(100|[1-9]?[0-9])\b', text)
+    out, seen = [], set()
+    for tok in raw:
+        p = int(tok)
+        if 1 <= p <= 100 and p not in seen:
+            seen.add(p)
+            out.append(p)
+    return out
+
 # --------------------------------------------------------------------------------------
 # Upload flow
 # --------------------------------------------------------------------------------------
@@ -444,10 +460,11 @@ def handle_chat(chat_history, user_message):
     dbbmm_params = None
 
     # Tool intent → fill lists (extensible)
+    warned_about_kde_100 = False
     if tool and tool.get("tool") == "home_range":
         method = tool.get("method")
         raw_levels = tool.get("levels", [95])
-        # keep only valid range 1..100 (do not clamp here)
+        # Valid 1..100
         levels = [int(p) for p in raw_levels if 1 <= int(p) <= 100]
 
         if method == "mcp":
@@ -474,9 +491,11 @@ def handle_chat(chat_history, user_message):
     # Fallback: keyword parse
     msg_lower = user_message.lower()
     if "mcp" in msg_lower:
-        mcp_list = parse_levels_from_text(user_message)
+        # IMPORTANT: use permissive parser here (allows 100)
+        parsed = _parse_levels_allow_100(user_message)
+        mcp_list = parsed or [95]
     if "kde" in msg_lower:
-        kde_list = parse_levels_from_text(user_message)
+        kde_list = parse_levels_from_text(user_message)  # keep existing (likely clamps ≤99)
 
     # LoCoH keywords (supports k/a/r + isopleths)
     if "locoh" in msg_lower:
@@ -502,13 +521,13 @@ def handle_chat(chat_history, user_message):
         if iso_str:
             iso = tuple(int(s) for s in re.split(r"[,\s]+", iso_str) if s)
         else:
-            parsed = parse_levels_from_text(user_message)
+            parsed = _parse_levels_allow_100(user_message)
             iso = tuple(parsed) if parsed else (50, 95)
         locoh_params = LoCoHParams(method=method, k=k, a=a, r=r, isopleths=iso)
 
     # dBBMM keywords
     if "dbbmm" in msg_lower:
-        dbbmm_list = parse_levels_from_text(user_message) or [95]
+        dbbmm_list = _parse_levels_allow_100(user_message) or [95]
         toks = parse_kv_tokens(user_message)
 
         def _get_float(keys, default):
@@ -570,23 +589,22 @@ def handle_chat(chat_history, user_message):
         return chat_history, gr.update(), gr.update(visible=False)
 
     results_exist = False
-    warned_about_kde_100 = False
-    locoh_result = None
-    locoh_error = None
-    dbbmm_result = None
-
     # KDE 100% → clamp to 99% and warn (keyword path)
     if kde_list:
         if 100 in kde_list or any("100" in s for s in user_message.split()):
             warned_about_kde_100 = True
         kde_list = [min(k, 99) for k in kde_list]
 
+    locoh_result = None
+    locoh_error = None
+    dbbmm_result = None
+
     # -------------------------
     # Run analyses
     # -------------------------
     if mcp_list:
         from estimators.mcp import add_mcps
-        add_mcps(df, mcp_list)
+        add_mcps(df, mcp_list)  # <-- now respects 100
         requested_percents.update(mcp_list)
         results_exist = True
 
@@ -616,7 +634,7 @@ def handle_chat(chat_history, user_message):
             if "timestamp" not in df.columns:
                 raise ValueError("dBBMM requires a timestamp column to model movement between fixes.")
             dbbmm_result = compute_dbbmm(
-                df=df,                      # df already standardized
+                df=df,
                 id_col="animal_id",
                 x_col="longitude",
                 y_col="latitude",
