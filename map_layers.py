@@ -324,7 +324,7 @@ def make_dbbmm_layers(dbbmm_results: dict, animal_ids, color_map, name_prefix="d
 
                     # --- transform ALL 4 corners from raster CRS -> WGS84 (EPSG:4326) ---
                     b = src.bounds
-                    src_crs = src.crs.to_string() if src.crs else "EPSG:6933"
+                    src_crs = src.crs.to_string() if src.crs else "EPSG:3857"
                     to_wgs = Transformer.from_crs(src_crs, "EPSG:4326", always_xy=True)
                     pts_m = [(b.left, b.bottom), (b.left, b.top), (b.right, b.bottom), (b.right, b.top)]
                     pts_ll = [to_wgs.transform(x, y) for x, y in pts_m]  # (lon, lat)
