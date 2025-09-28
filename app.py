@@ -163,12 +163,10 @@ def handle_upload_initial(file):
     cached_headers = get_cached_headers()
     lower_cols = [c.lower() for c in cached_headers]
 
-    # ---------- detect heuristic lon/lat candidates (from your coords_utils) ----------
-    # Try an early guess just like your prior flow if not explicit 'latitude' 'longitude'
+    # ---------- detect heuristic lon/lat candidates ----------
     found_x = found_y = None
     latlon_guess = None
     try:
-        # looks_like_latlon returns ('lonlat' or 'latlon', x_col, y_col) when confident; else None
         guess = looks_like_latlon(get_cached_df(), cached_headers)
         if isinstance(guess, tuple) and len(guess) == 3:
             latlon_guess, found_x, found_y = guess
@@ -205,8 +203,8 @@ def handle_upload_initial(file):
 
         # Detect source ID/timestamp column names BEFORE standardizing
         from schema_detect import detect_id_column, detect_timestamp_column, ID_COL, TS_COL
-        src_id = detect_id_column(df0)            # e.g., "test_1" or None
-        src_ts = detect_timestamp_column(df0)     # e.g., "test_2" or None
+        src_id = detect_id_column(df0)
+        src_ts = detect_timestamp_column(df0)
 
         # Standardize to animal_id / timestamp
         df1, meta_msgs = detect_and_standardize(df0)
@@ -216,7 +214,6 @@ def handle_upload_initial(file):
 
         id_found  = (ID_COL in df1.columns)
         ts_found  = (TS_COL in df1.columns)
-        # Prefer showing the *source* column names if found, otherwise "not detected"
         id_note   = f"• **ID column**: `{src_id}`" if src_id else "• **ID column**: `not detected`"
         ts_note   = f"• **Timestamp column**: `{src_ts}`" if src_ts else "• **Timestamp column**: `not detected`"
 
@@ -449,12 +446,20 @@ def handle_chat(chat_history, user_message):
     # Tool intent → fill lists (extensible)
     if tool and tool.get("tool") == "home_range":
         method = tool.get("method")
-        levels = tool.get("levels", [95])
-        levels = [min(int(p), 99) for p in levels if 1 <= int(p) <= 100]
+        raw_levels = tool.get("levels", [95])
+        # keep only valid range 1..100 (do not clamp here)
+        levels = [int(p) for p in raw_levels if 1 <= int(p) <= 100]
+
         if method == "mcp":
+            # allow 100% for MCP
             mcp_list = levels
+
         elif method == "kde":
-            kde_list = levels
+            # clamp KDE to 99%, warn if 100 was requested
+            if 100 in levels:
+                warned_about_kde_100 = True
+            kde_list = [min(p, 99) for p in levels]
+
         elif method == "locoh":
             locoh_requested = True
             locoh_params = LoCoHParams(method=tool.get("locoh_method", "k"),
@@ -464,7 +469,6 @@ def handle_chat(chat_history, user_message):
                                        isopleths=tuple(levels or (50, 95)))
         elif method == "dbbmm":
             dbbmm_list = levels or [95]
-            # fall back to default params; keyword parse below can override
             dbbmm_params = DBBMMParams(isopleths=tuple(dbbmm_list))
 
     # Fallback: keyword parse
@@ -571,7 +575,7 @@ def handle_chat(chat_history, user_message):
     locoh_error = None
     dbbmm_result = None
 
-    # KDE 100% → clamp to 99% and warn
+    # KDE 100% → clamp to 99% and warn (keyword path)
     if kde_list:
         if 100 in kde_list or any("100" in s for s in user_message.split()):
             warned_about_kde_100 = True
