@@ -19,9 +19,10 @@ from storage import (
     clear_all_results,
     mcp_results, kde_results,
     requested_percents, requested_kde_percents,
-    save_all_mcps_zip,
-    set_locoh_results,
-    set_dbbmm_results, requested_dbbmm_percents
+    save_all_mcps_zip, 
+    set_locoh_results, get_locoh_results,
+    set_dbbmm_results, get_dbbmm_results, 
+    requested_dbbmm_percents
 )
 
 from llm_utils import ask_llm
@@ -647,6 +648,10 @@ def handle_chat(chat_history, user_message):
             results_exist = True
         except Exception as e:
             chat_history.append({"role": "assistant", "content": f"dBBMM error: {e}"})
+            
+    # Use persisted results if this turn did not produce new ones
+    effective_locoh  = locoh_result  if locoh_result  is not None else get_locoh_results()
+    effective_dbbmm  = dbbmm_result  if dbbmm_result  is not None else get_dbbmm_results()
 
     # Build map (points/tracks + estimators)
     map_html = build_results_map(
@@ -655,8 +660,8 @@ def handle_chat(chat_history, user_message):
         kde_results=kde_results,
         requested_percents=requested_percents,
         requested_kde_percents=requested_kde_percents,
-        locoh_result=locoh_result,
-        dbbmm_result=dbbmm_result,
+        locoh_result=effective_locoh,
+        dbbmm_result=effective_dbbmm
     )
 
     # Compose assistant message & ZIP
