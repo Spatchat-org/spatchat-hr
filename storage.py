@@ -292,6 +292,7 @@ def save_all_mcps_zip():
     _write_mcp_assets(rows, outdir)
     _write_kde_assets(rows, outdir)
     _write_locoh_assets(rows, outdir)
+    _write_dbbmm_assets(rows, outdir)
 
     # Areas CSV (one table for all estimators)
     if rows:
