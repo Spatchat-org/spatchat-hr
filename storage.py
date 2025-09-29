@@ -148,6 +148,9 @@ def _write_kde_assets(rows_accum: list[tuple], outdir: str):
 
     # Accumulator for consolidated output
     features_all = []
+    # NEW: track per-animal GeoJSONs we ingest so we can delete them after consolidation
+    to_delete_paths = set()
+    outdir_abs = os.path.abspath(outdir)
 
     for animal, percents in kde_results.items():
         index["animals"][animal] = {}
@@ -172,6 +175,10 @@ def _write_kde_assets(rows_accum: list[tuple], outdir: str):
                         feat_list = gj.get("features", []) or []
                     elif isinstance(gj, dict) and gj.get("type") == "Feature":
                         feat_list = [gj]
+                    # Mark for deletion only if it's inside outputs/
+                    gj_abs = os.path.abspath(gj_path)
+                    if gj_abs.startswith(outdir_abs + os.sep):
+                        to_delete_paths.add(gj_abs)
                 except Exception:
                     feat_list = []
 
@@ -205,6 +212,13 @@ def _write_kde_assets(rows_accum: list[tuple], outdir: str):
         fc_all = {"type": "FeatureCollection", "features": features_all}
         with open(os.path.join(outdir, "kdes_all.geojson"), "w") as f:
             json.dump(fc_all, f)
+
+        # NEW: remove per-animal KDE GeoJSONs we ingested so they won't be zipped
+        for p in sorted(to_delete_paths):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
 
 def _write_locoh_assets(rows_accum: list[tuple], outdir: str):
     """
