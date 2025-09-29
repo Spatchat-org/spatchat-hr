@@ -4,8 +4,8 @@ import shutil
 import json
 import zipfile
 import pandas as pd
-from shapely.geometry import mapping
 from collections import defaultdict
+from shapely.geometry import mapping
 
 # ---- Global analysis state (shared across modules) ----
 # MCP: {animal_id: {percent: {"polygon": shapely.Polygon, "area": float}}}
@@ -26,6 +26,10 @@ kde_results = {}
 #           "n_points": int,
 #           "isopleths": [
 #               {"isopleth": 50, "area_sq_km": float, "geometry": <GeoJSON>},
+#               ...
+#           ],
+#           "facets": [
+#               {"cum_percent": 50, "area_sq_km": float, "geometry": <GeoJSON>},
 #               ...
 #           ]
 #       }, ...
@@ -106,7 +110,7 @@ def clear_all_results():
     os.makedirs("outputs", exist_ok=True)
 
 # --------------------------------------------------------------------------------------
-# Estimator-specific writers (small, focused)
+# Estimator-specific writers (consolidated outputs only)
 # --------------------------------------------------------------------------------------
 def _write_mcp_assets(rows_accum: list[tuple], outdir: str):
     """
@@ -122,31 +126,28 @@ def _write_mcp_assets(rows_accum: list[tuple], outdir: str):
             if poly is not None:
                 features.append({
                     "type": "Feature",
-                    "properties": {"animal_id": animal, "percent": int(percent), "area_km2": area},
+                    "properties": {"animal_id": str(animal), "percent": int(percent), "area_km2": area},
                     "geometry": mapping(poly)
                 })
 
     if features:
-        geojson = {"type": "FeatureCollection", "features": features}
+        fc = {"type": "FeatureCollection", "features": features}
         with open(os.path.join(outdir, "mcps_all.geojson"), "w") as f:
-            json.dump(geojson, f)
+            json.dump(fc, f)
 
 def _write_kde_assets(rows_accum: list[tuple], outdir: str):
     """
     rows_accum += (animal_id, 'KDE-<percent>', area_km2)
-    Writes:
+    Writes consolidated files only:
       - kde_index.json (areas + pointers to rasters/contours)
-      - kde_envelopes.geojson (ALL animals × isopleths, if any are available)
-      - kde_<percent>.geojson (optional per-isopleth consolidated files)
-    Note: if per-animal GeoJSON files are missing, falls back to serializing
-    in-memory shapely contour geometry (if present) to include in merged outputs.
+      - kdes_all.geojson (ALL animals × isopleths, if geometries are available)
+    Falls back to in-memory shapely contours if per-animal GeoJSON paths are absent.
     """
     index = {"animals": {}}
     any_kde = False
 
-    # Accumulators for consolidated outputs
-    envelope_features = []
-    features_by_percent = defaultdict(list)
+    # Accumulator for consolidated output
+    features_all = []
 
     for animal, percents in kde_results.items():
         index["animals"][animal] = {}
@@ -160,76 +161,58 @@ def _write_kde_assets(rows_accum: list[tuple], outdir: str):
                 "geojson": v.get("geojson"),
             }
 
-            # Ingest per-animal GeoJSON if it exists
+            # Prefer existing GeoJSON path if present; else serialize contour geometry
+            feat_list = []
             gj_path = v.get("geojson")
-            feats_ingested = False
             if gj_path and os.path.exists(gj_path):
                 try:
                     with open(gj_path, "r") as f:
                         gj = json.load(f)
-                    feats = []
                     if isinstance(gj, dict) and gj.get("type") == "FeatureCollection":
-                        feats = gj.get("features", [])
+                        feat_list = gj.get("features", []) or []
                     elif isinstance(gj, dict) and gj.get("type") == "Feature":
-                        feats = [gj]
-                    # Normalize properties and accumulate
-                    for feat in feats:
-                        if not isinstance(feat, dict):
-                            continue
-                        props = feat.setdefault("properties", {})
-                        props["animal_id"] = str(animal)
-                        props["percent"] = int(percent)
-                        props["area_km2"] = area
-                        envelope_features.append(feat)
-                        features_by_percent[int(percent)].append(feat)
-                    feats_ingested = True
+                        feat_list = [gj]
                 except Exception:
-                    # Ignore malformed or unreadable files; try shapely fallback below
-                    feats_ingested = False
+                    feat_list = []
 
-            # Fallback: serialize in-memory contour geometry if no file was ingested
-            if not feats_ingested:
+            if not feat_list:
                 contour = v.get("contour")
                 if contour is not None:
                     try:
-                        feat = {
+                        feat_list = [{
                             "type": "Feature",
-                            "properties": {
-                                "animal_id": str(animal),
-                                "percent": int(percent),
-                                "area_km2": area,
-                            },
+                            "properties": {},
                             "geometry": mapping(contour),
-                        }
-                        envelope_features.append(feat)
-                        features_by_percent[int(percent)].append(feat)
+                        }]
                     except Exception:
-                        pass  # If we can't serialize, just skip consolidation for this item
+                        feat_list = []
+
+            # Normalize properties and accumulate
+            for feat in feat_list:
+                if not isinstance(feat, dict):
+                    continue
+                props = feat.setdefault("properties", {})
+                props["animal_id"] = str(animal)
+                props["percent"] = int(percent)
+                props["area_km2"] = area
+                features_all.append(feat)
 
     if any_kde:
         with open(os.path.join(outdir, "kde_index.json"), "w") as f:
             json.dump(index, f, indent=2)
 
-    # Consolidated outputs
-    if envelope_features:
-        fc_all = {"type": "FeatureCollection", "features": envelope_features}
-        with open(os.path.join(outdir, "kde_envelopes.geojson"), "w") as f:
+    if features_all:
+        fc_all = {"type": "FeatureCollection", "features": features_all}
+        with open(os.path.join(outdir, "kdes_all.geojson"), "w") as f:
             json.dump(fc_all, f)
-
-        for p, feats in features_by_percent.items():
-            fc_p = {"type": "FeatureCollection", "features": feats}
-            with open(os.path.join(outdir, f"kde_{p}.geojson"), "w") as f:
-                json.dump(fc_p, f)
 
 def _write_locoh_assets(rows_accum: list[tuple], outdir: str):
     """
     rows_accum += (animal_id, 'LoCoH-<isopleth>', area_km2)
-    Writes:
+    Writes consolidated files only:
       - locoh_results.json               (full object: envelopes + facets)
-      - locoh_<animal>_<iso>.geojson     (per-animal, per-isopleth ENVELOPE)
-      - locoh_facets_<animal>.geojson    (per-animal FACETS: tiny local hulls)
-      - locoh_envelopes.geojson          (ALL animals×isopleth envelopes in one file)
-      - locoh_facets.geojson             (ALL facets in one file)
+      - locoh_envelopes_all.geojson      (ALL animals × isopleths)
+      - locoh_facets_all.geojson         (ALL animals facets)
     """
     if not locoh_results or not isinstance(locoh_results, dict):
         return
@@ -245,7 +228,7 @@ def _write_locoh_assets(rows_accum: list[tuple], outdir: str):
     facets_features = []     # all animals facets
 
     for animal_id, data in animals.items():
-        # ----- Envelopes (single-piece per isopleth) -----
+        # Envelopes (single-piece per isopleth)
         for item in data.get("isopleths", []):
             iso = int(item.get("isopleth"))
             area = float(item.get("area_sq_km", 0.0))
@@ -253,66 +236,45 @@ def _write_locoh_assets(rows_accum: list[tuple], outdir: str):
 
             gj = item.get("geometry")
             if gj:
-                feat_env = {
+                envelope_features.append({
                     "type": "Feature",
-                    "properties": {"animal_id": animal_id, "isopleth": iso, "area_km2": area},
+                    "properties": {"animal_id": str(animal_id), "isopleth": iso, "area_km2": area},
                     "geometry": gj,
-                }
-                envelope_features.append(feat_env)
+                })
 
-                # Per-animal, per-isopleth file (kept for convenience)
-                fc_env_one = {"type": "FeatureCollection", "features": [feat_env]}
-                fname_env_one = f"locoh_{str(animal_id).replace(' ', '_')}_{iso}.geojson"
-                with open(os.path.join(outdir, fname_env_one), "w") as f:
-                    json.dump(fc_env_one, f)
-
-        # ----- Facets (tiny hulls; many features) -----
-        animal_facets = []
+        # Facets (tiny hulls; many features)
         for fct in (data.get("facets") or []):
-            feat_facet = {
+            facets_features.append({
                 "type": "Feature",
                 "properties": {
-                    "animal_id": animal_id,
+                    "animal_id": str(animal_id),
                     "cum_percent": int(fct.get("cum_percent", 0)),
                     "area_km2": float(fct.get("area_sq_km", 0.0)),
                 },
                 "geometry": fct.get("geometry"),
-            }
-            animal_facets.append(feat_facet)
-            facets_features.append(feat_facet)
+            })
 
-        # Per-animal facets file (only if present)
-        if animal_facets:
-            fc_facets_one = {"type": "FeatureCollection", "features": animal_facets}
-            fname_facets_one = f"locoh_facets_{str(animal_id).replace(' ', '_')}.geojson"
-            with open(os.path.join(outdir, fname_facets_one), "w") as f:
-                json.dump(fc_facets_one, f)
-
-    # ----- Consolidated files -----
+    # Consolidated files
     if envelope_features:
         fc_env_all = {"type": "FeatureCollection", "features": envelope_features}
-        with open(os.path.join(outdir, "locoh_envelopes.geojson"), "w") as f:
+        with open(os.path.join(outdir, "locoh_envelopes_all.geojson"), "w") as f:
             json.dump(fc_env_all, f)
 
     if facets_features:
         fc_fac_all = {"type": "FeatureCollection", "features": facets_features}
-        with open(os.path.join(outdir, "locoh_facets.geojson"), "w") as f:
+        with open(os.path.join(outdir, "locoh_facets_all.geojson"), "w") as f:
             json.dump(fc_fac_all, f)
 
 def _write_dbbmm_assets(rows_accum: list[tuple], outdir: str):
     """
-    Writes:
-      - dbbmm_index.json (areas + pointers)
-      - dbbmm_<animal>_<percent>.geojson (per-animal envelopes)
-      - dbbmm_envelopes.geojson (ALL animals × isopleths consolidated)
-      - dbbmm_<percent>.geojson (optional per-isopleth consolidated files)
+    rows_accum += (animal_id, 'dBBMM-<percent>', area_km2)
+    Writes consolidated files only:
+      - dbbmm_index.json      (areas + pointers)
+      - dbbmms_all.geojson    (ALL animals × isopleths)
     """
     index = {"animals": {}}
     any_bb = False
-
-    # Accumulators for consolidated outputs
-    envelope_features = []
-    features_by_percent = defaultdict(list)
+    features_all = []
 
     for animal, data in dbbmm_results.items():
         any_bb = True
@@ -330,65 +292,45 @@ def _write_dbbmm_assets(rows_accum: list[tuple], outdir: str):
         for item in iso_list:
             p = int(item.get("percent"))
             area = float(item.get("area_sq_km", 0.0))
-            rows_accum.append((animal, f"dBBMM-{p}", area))
             index["animals"][animal]["isopleths"].append({"percent": p, "area_km2": area})
+            rows_accum.append((animal, f"dBBMM-{p}", area))
 
             gj = item.get("geometry")
             if gj:
-                feat = {
+                features_all.append({
                     "type": "Feature",
                     "properties": {"animal_id": str(animal), "percent": p, "area_km2": area},
                     "geometry": gj,
-                }
-                # Per-animal, per-isopleth file
-                fc = {"type": "FeatureCollection", "features": [feat]}
-                fname = f"dbbmm_{str(animal).replace(' ', '_')}_{p}.geojson"
-                with open(os.path.join(outdir, fname), "w") as f:
-                    json.dump(fc, f)
-
-                # Consolidated accumulators
-                envelope_features.append(feat)
-                features_by_percent[p].append(feat)
+                })
 
     if any_bb:
         with open(os.path.join(outdir, "dbbmm_index.json"), "w") as f:
             json.dump(index, f, indent=2)
 
-    # Consolidated outputs
-    if envelope_features:
-        fc_all = {"type": "FeatureCollection", "features": envelope_features}
-        with open(os.path.join(outdir, "dbbmm_envelopes.geojson"), "w") as f:
+    if features_all:
+        fc_all = {"type": "FeatureCollection", "features": features_all}
+        with open(os.path.join(outdir, "dbbmms_all.geojson"), "w") as f:
             json.dump(fc_all, f)
 
-        for p, feats in features_by_percent.items():
-            fc_p = {"type": "FeatureCollection", "features": feats}
-            with open(os.path.join(outdir, f"dbbmm_{p}.geojson"), "w") as f:
-                json.dump(fc_p, f)
-
 # --------------------------------------------------------------------------------------
-# Orchestrator (keeps your existing name/signature for compatibility)
+# Orchestrator
 # --------------------------------------------------------------------------------------
 def save_all_mcps_zip():
     """
     Writes (under ./outputs):
-      - mcps_all.geojson                       (if MCP exists)
-      - kde_index.json                         (if KDE exists; points to external rasters/contours)
-      - kde_envelopes.geojson, kde_<p>.geojson (consolidated KDE contours, if any)
-      - locoh_results.json                     (if LoCoH exists)
-      - locoh_<animal>_<iso>.geojson          (per-animal LoCoH envelopes)
-      - locoh_envelopes.geojson, locoh_facets.geojson
-      - dbbmm_index.json                       (if dBBMM exists)
-      - dbbmm_<animal>_<p>.geojson            (per-animal dBBMM envelopes)
-      - dbbmm_envelopes.geojson, dbbmm_<p>.geojson
-      - home_range_areas.csv                   (areas for MCP + KDE + LoCoH + dBBMM)
-      - spatchat_results.zip                   (zip of everything in outputs/)
+      - mcps_all.geojson
+      - kde_index.json, kdes_all.geojson
+      - locoh_results.json, locoh_envelopes_all.geojson, locoh_facets_all.geojson
+      - dbbmm_index.json, dbbmms_all.geojson
+      - home_range_areas.csv
+      - spatchat_results.zip              (zip of everything in outputs/)
     Returns path to the zip.
     """
     os.makedirs("outputs", exist_ok=True)
     rows: list[tuple] = []
     outdir = "outputs"
 
-    # Per-estimator writers
+    # Per-estimator writers (consolidated only)
     _write_mcp_assets(rows, outdir)
     _write_kde_assets(rows, outdir)
     _write_locoh_assets(rows, outdir)
@@ -397,7 +339,6 @@ def save_all_mcps_zip():
     # Areas CSV (one table for all estimators)
     if rows:
         df = pd.DataFrame(rows, columns=["animal_id", "type", "area_km2"])
-        # Stable ordering: animal, then type
         df.sort_values(["animal_id", "type"], inplace=True)
         df.to_csv(os.path.join(outdir, "home_range_areas.csv"), index=False)
 
