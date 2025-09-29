@@ -484,7 +484,7 @@ def handle_chat(chat_history, user_message):
                                        k=int(tool.get("k", 10)),
                                        a=tool.get("a"),
                                        r=tool.get("r"),
-                                       isopleths=tuple(levels or (50, 95)))
+                                       isopleths=tuple(levels or (95,)))
         elif method == "dbbmm":
             dbbmm_list = levels or [95]
             dbbmm_params = DBBMMParams(isopleths=tuple(dbbmm_list))
@@ -523,7 +523,7 @@ def handle_chat(chat_history, user_message):
             iso = tuple(int(s) for s in re.split(r"[,\s]+", iso_str) if s)
         else:
             parsed = _parse_levels_allow_100(user_message)
-            iso = tuple(parsed) if parsed else (50, 95)
+            iso = tuple(parsed) if parsed else (95,)
         locoh_params = LoCoHParams(method=method, k=k, a=a, r=r, isopleths=iso)
 
     # dBBMM keywords
